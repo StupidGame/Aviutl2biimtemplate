@@ -278,10 +278,15 @@ int wmain(int argc, wchar_t** argv) {
         table, L"\u9078\u3093\u3060\u7d20\u6750\u3092\u914d\u7f6e", L"button"));
     auto* game_sequence_button = static_cast<FILTER_ITEM_BUTTON*>(find_filter_item(
         table, L"\u30b2\u30fc\u30e0\u6b04\u3078\u8907\u6570\u7d20\u6750\u3092\u8ffd\u52a0", L"button"));
-    auto* bottom_right_sequence_button = static_cast<FILTER_ITEM_BUTTON*>(find_filter_item(
+    auto* edit_game_sequence_button = static_cast<FILTER_ITEM_BUTTON*>(find_filter_item(
+        table, L"\u30b2\u30fc\u30e0\u7d20\u6750\u306e\u9806\u756a\u3092\u64cd\u4f5c", L"button"));
+    auto* place_bottom_right_sequence_button = static_cast<FILTER_ITEM_BUTTON*>(find_filter_item(
         table, L"\u53f3\u4e0b\u6b04\u3078\u8907\u6570\u7d20\u6750\u3092\u8ffd\u52a0", L"button"));
+    auto* edit_bottom_right_sequence_button = static_cast<FILTER_ITEM_BUTTON*>(find_filter_item(
+        table, L"\u53f3\u4e0b\u7d20\u6750\u306e\u9806\u756a\u3092\u64cd\u4f5c", L"button"));
     if (result == 0 && (!game_file || !bottom_right_file || !place_button ||
-                        !game_sequence_button || !bottom_right_sequence_button)) {
+                        !game_sequence_button || !edit_game_sequence_button ||
+                        !place_bottom_right_sequence_button || !edit_bottom_right_sequence_button)) {
         result = fail("the media controls are missing");
     }
 

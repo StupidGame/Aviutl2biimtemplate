@@ -33,7 +33,9 @@ auto auto_scale = FILTER_ITEM_CHECK(L"720p\u57fa\u6e96\u3067\u62e1\u7e2e", true)
 
 void place_media_files(EDIT_SECTION* edit);
 void place_game_media_sequence(EDIT_SECTION* edit);
+void edit_game_media_order(EDIT_SECTION* edit);
 void place_bottom_right_media_sequence(EDIT_SECTION* edit);
+void edit_bottom_right_media_order(EDIT_SECTION* edit);
 
 auto media_group = FILTER_ITEM_GROUP(L"\u52d5\u753b\u30fb\u753b\u50cf");
 constexpr wchar_t media_file_filter[] =
@@ -45,8 +47,12 @@ auto bottom_right_media_file = FILTER_ITEM_FILE(L"\u53f3\u4e0b\u306e\u52d5\u753b
 auto place_media_button = FILTER_ITEM_BUTTON(L"\u9078\u3093\u3060\u7d20\u6750\u3092\u914d\u7f6e", place_media_files);
 auto place_game_sequence_button = FILTER_ITEM_BUTTON(
     L"\u30b2\u30fc\u30e0\u6b04\u3078\u8907\u6570\u7d20\u6750\u3092\u8ffd\u52a0", place_game_media_sequence);
+auto edit_game_sequence_button = FILTER_ITEM_BUTTON(
+    L"\u30b2\u30fc\u30e0\u7d20\u6750\u306e\u9806\u756a\u3092\u64cd\u4f5c", edit_game_media_order);
 auto place_bottom_right_sequence_button = FILTER_ITEM_BUTTON(
     L"\u53f3\u4e0b\u6b04\u3078\u8907\u6570\u7d20\u6750\u3092\u8ffd\u52a0", place_bottom_right_media_sequence);
+auto edit_bottom_right_sequence_button = FILTER_ITEM_BUTTON(
+    L"\u53f3\u4e0b\u7d20\u6750\u306e\u9806\u756a\u3092\u64cd\u4f5c", edit_bottom_right_media_order);
 auto bottom_right_transparent = FILTER_ITEM_CHECK(L"\u53f3\u4e0b\u6b04\u3092\u900f\u904e", false);
 
 auto background_group = FILTER_ITEM_GROUP(L"\u80cc\u666f");
@@ -90,7 +96,9 @@ void* filter_items[] = {
     &bottom_right_media_file,
     &place_media_button,
     &place_game_sequence_button,
+    &edit_game_sequence_button,
     &place_bottom_right_sequence_button,
+    &edit_bottom_right_sequence_button,
     &bottom_right_transparent,
     &background_group,
     &sidebar_color,
@@ -927,38 +935,144 @@ std::vector<std::wstring> open_media_file_dialog() {
     return files;
 }
 
+std::wstring extract_file_path_from_alias(LPCSTR alias) {
+    if (!alias) {
+        return {};
+    }
+    std::string text(alias);
+    std::size_t pos = 0;
+    while (pos < text.size()) {
+        std::size_t next_line = text.find_first_of("\r\n", pos);
+        if (next_line == std::string::npos) {
+            next_line = text.size();
+        }
+        std::string line = text.substr(pos, next_line - pos);
+        if (line.rfind("file=", 0) == 0) {
+            std::string path_utf8 = line.substr(5);
+            if (!path_utf8.empty() && (path_utf8.front() == '"' || path_utf8.front() == '\'')) {
+                path_utf8 = path_utf8.substr(1);
+            }
+            if (!path_utf8.empty() && (path_utf8.back() == '"' || path_utf8.back() == '\'')) {
+                path_utf8.pop_back();
+            }
+            if (!path_utf8.empty()) {
+                const int length = MultiByteToWideChar(CP_UTF8, 0, path_utf8.c_str(), -1, nullptr, 0);
+                if (length > 1) {
+                    std::wstring wide(static_cast<std::size_t>(length) - 1, L'\0');
+                    MultiByteToWideChar(CP_UTF8, 0, path_utf8.c_str(), -1, wide.data(), length);
+                    return wide;
+                }
+            }
+        }
+        pos = text.find_first_not_of("\r\n", next_line);
+    }
+    return {};
+}
+
+std::wstring get_media_object_path(EDIT_SECTION* edit, OBJECT_HANDLE object) {
+    if (!edit || !object) {
+        return {};
+    }
+    if (edit->get_object_alias) {
+        LPCSTR alias = edit->get_object_alias(object);
+        if (alias) {
+            std::wstring path = extract_file_path_from_alias(alias);
+            if (!path.empty()) {
+                return path;
+            }
+        }
+    }
+    if (edit->get_object_item_value) {
+        const LPCWSTR effects[] = {
+            L"\u52d5\u753b\u30d5\u30a1\u30a4\u30eb",
+            L"\u753b\u50cf\u30d5\u30a1\u30a4\u30eb",
+            nullptr
+        };
+        const LPCWSTR items[] = {
+            L"file",
+            L"\u30d5\u30a1\u30a4\u30eb",
+            nullptr
+        };
+        for (int e = 0; effects[e]; ++e) {
+            for (int i = 0; items[i]; ++i) {
+                LPCSTR value = edit->get_object_item_value(object, effects[e], items[i]);
+                if (value && *value) {
+                    const int length = MultiByteToWideChar(CP_UTF8, 0, value, -1, nullptr, 0);
+                    if (length > 1) {
+                        std::wstring wide(static_cast<std::size_t>(length) - 1, L'\0');
+                        MultiByteToWideChar(CP_UTF8, 0, value, -1, wide.data(), length);
+                        return wide;
+                    }
+                }
+            }
+        }
+    }
+    return {};
+}
+
 constexpr int order_list_id = 2101;
 constexpr int order_up_id = 2102;
 constexpr int order_down_id = 2103;
+constexpr int order_add_id = 2107;
 constexpr int order_remove_id = 2104;
 constexpr int order_accept_id = 2105;
 constexpr int order_cancel_id = 2106;
 
+struct MediaOrderItem {
+    OBJECT_HANDLE handle = nullptr;
+    std::wstring path;
+    int length = 1;
+};
+
 struct OrderDialogState {
-    std::vector<std::wstring>* files = nullptr;
+    std::vector<MediaOrderItem>* items = nullptr;
+    const EDIT_SECTION* edit = nullptr;
     bool accepted = false;
 };
 
-std::wstring media_display_name(const std::wstring& path, std::size_t index) {
-    const std::size_t separator = path.find_last_of(L"\\/");
-    const std::wstring filename = separator == std::wstring::npos
-        ? path
-        : path.substr(separator + 1);
-    return std::to_wstring(index + 1) + L". " + filename;
+std::wstring media_order_item_display_name(const MediaOrderItem& item, std::size_t index) {
+    std::wstring filename;
+    if (!item.path.empty()) {
+        const std::size_t separator = item.path.find_last_of(L"\\/");
+        filename = (separator == std::wstring::npos)
+            ? item.path
+            : item.path.substr(separator + 1);
+    } else {
+        filename = L"\u914d\u7f6e\u6e08\u307f\u7d20\u6750";
+    }
+    return std::to_wstring(index + 1) + L". " + filename + L" (" +
+           std::to_wstring(item.length) + L"F)";
+}
+
+enum class MediaDestination {
+    game,
+    bottom_right,
+};
+
+int media_sequence_length(const EDIT_INFO& info, const MEDIA_INFO& media) {
+    const double frames_per_second = info.rate > 0 && info.scale > 0
+        ? static_cast<double>(info.rate) / static_cast<double>(info.scale)
+        : 30.0;
+    const double seconds = media.total_time > 0.0 ? media.total_time : 5.0;
+    const double frames = std::ceil(seconds * frames_per_second);
+    return static_cast<int>(std::clamp(
+        frames,
+        1.0,
+        static_cast<double>((std::numeric_limits<int>::max)() / 4)));
 }
 
 void refresh_order_list(HWND window, OrderDialogState* state, int selection) {
-    if (!window || !state || !state->files) {
+    if (!window || !state || !state->items) {
         return;
     }
     const HWND list = GetDlgItem(window, order_list_id);
     SendMessageW(list, LB_RESETCONTENT, 0, 0);
-    for (std::size_t index = 0; index < state->files->size(); ++index) {
-        const std::wstring label = media_display_name((*state->files)[index], index);
+    for (std::size_t index = 0; index < state->items->size(); ++index) {
+        const std::wstring label = media_order_item_display_name((*state->items)[index], index);
         SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
     }
-    if (!state->files->empty()) {
-        selection = std::clamp(selection, 0, static_cast<int>(state->files->size()) - 1);
+    if (!state->items->empty()) {
+        selection = std::clamp(selection, 0, static_cast<int>(state->items->size()) - 1);
         SendMessageW(list, LB_SETCURSEL, selection, 0);
     }
 }
@@ -996,9 +1110,14 @@ LRESULT CALLBACK order_dialog_proc(HWND window, UINT message, WPARAM wparam, LPA
                 454, 52, 105, 32, window,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(order_down_id)), GetModuleHandleW(nullptr), nullptr));
             set_control_font(CreateWindowExW(
+                0, L"BUTTON", L"\u7d20\u6750\u3092\u8ffd\u52a0",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                454, 98, 105, 32, window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(order_add_id)), GetModuleHandleW(nullptr), nullptr));
+            set_control_font(CreateWindowExW(
                 0, L"BUTTON", L"\u4e00\u89a7\u304b\u3089\u5916\u3059",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                454, 100, 105, 32, window,
+                454, 138, 105, 32, window,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(order_remove_id)), GetModuleHandleW(nullptr), nullptr));
             set_control_font(CreateWindowExW(
                 0, L"BUTTON", L"\u914d\u7f6e",
@@ -1014,33 +1133,60 @@ LRESULT CALLBACK order_dialog_proc(HWND window, UINT message, WPARAM wparam, LPA
             return 0;
         }
         case WM_COMMAND: {
-            if (!state || !state->files) {
+            if (!state || !state->items) {
                 break;
             }
             const int command = LOWORD(wparam);
             const HWND list = GetDlgItem(window, order_list_id);
             const int selected = static_cast<int>(SendMessageW(list, LB_GETCURSEL, 0, 0));
             if (command == order_up_id && selected > 0) {
-                std::swap((*state->files)[static_cast<std::size_t>(selected)],
-                          (*state->files)[static_cast<std::size_t>(selected - 1)]);
+                std::swap((*state->items)[static_cast<std::size_t>(selected)],
+                          (*state->items)[static_cast<std::size_t>(selected - 1)]);
                 refresh_order_list(window, state, selected - 1);
                 return 0;
             }
             if (command == order_down_id && selected >= 0 &&
-                selected + 1 < static_cast<int>(state->files->size())) {
-                std::swap((*state->files)[static_cast<std::size_t>(selected)],
-                          (*state->files)[static_cast<std::size_t>(selected + 1)]);
+                selected + 1 < static_cast<int>(state->items->size())) {
+                std::swap((*state->items)[static_cast<std::size_t>(selected)],
+                          (*state->items)[static_cast<std::size_t>(selected + 1)]);
                 refresh_order_list(window, state, selected + 1);
                 return 0;
             }
+            if (command == order_add_id) {
+                std::vector<std::wstring> added_files = open_media_file_dialog();
+                if (!added_files.empty()) {
+                    int insert_pos = (selected >= 0 && selected < static_cast<int>(state->items->size()))
+                        ? selected + 1
+                        : static_cast<int>(state->items->size());
+                    for (const auto& path : added_files) {
+                        int item_len = 150;
+                        if (state->edit && state->edit->info) {
+                            MEDIA_INFO media{};
+                            if (state->edit->get_media_info &&
+                                state->edit->get_media_info(path.c_str(), &media, sizeof(media)) &&
+                                media.width > 0 && media.height > 0) {
+                                item_len = media_sequence_length(*state->edit->info, media);
+                            }
+                        }
+                        MediaOrderItem new_item{};
+                        new_item.handle = nullptr;
+                        new_item.path = path;
+                        new_item.length = item_len;
+                        state->items->insert(state->items->begin() + insert_pos, std::move(new_item));
+                        insert_pos++;
+                    }
+                    refresh_order_list(window, state, insert_pos - 1);
+                }
+                return 0;
+            }
             if (command == order_remove_id && selected >= 0 &&
-                selected < static_cast<int>(state->files->size())) {
-                state->files->erase(state->files->begin() + selected);
+                selected < static_cast<int>(state->items->size())) {
+                state->items->erase(state->items->begin() + selected);
                 refresh_order_list(window, state, selected);
                 return 0;
             }
             if (command == order_accept_id) {
-                state->accepted = !state->files->empty();
+                state->accepted = !state->items->empty();
                 DestroyWindow(window);
                 return 0;
             }
@@ -1059,11 +1205,7 @@ LRESULT CALLBACK order_dialog_proc(HWND window, UINT message, WPARAM wparam, LPA
     return DefWindowProcW(window, message, wparam, lparam);
 }
 
-bool edit_media_order(std::vector<std::wstring>& files) {
-    if (files.size() <= 1) {
-        return !files.empty();
-    }
-
+bool edit_media_order_dialog(std::vector<MediaOrderItem>& items, const EDIT_SECTION* edit, LPCWSTR title) {
     constexpr wchar_t class_name[] = L"BiimTemplateMediaOrderWindow";
     WNDCLASSW window_class{};
     window_class.lpfnWndProc = order_dialog_proc;
@@ -1075,7 +1217,7 @@ bool edit_media_order(std::vector<std::wstring>& files) {
         return false;
     }
 
-    OrderDialogState state{&files, false};
+    OrderDialogState state{&items, edit, false};
     const HWND owner = GetActiveWindow();
     RECT rectangle{0, 0, 575, 430};
     AdjustWindowRectEx(&rectangle, WS_CAPTION | WS_SYSMENU | WS_POPUP, FALSE, WS_EX_DLGMODALFRAME);
@@ -1092,7 +1234,7 @@ bool edit_media_order(std::vector<std::wstring>& files) {
     const HWND window = CreateWindowExW(
         WS_EX_DLGMODALFRAME,
         class_name,
-        L"\u7d20\u6750\u306e\u914d\u7f6e\u9806",
+        title ? title : L"\u7d20\u6750\u306e\u914d\u7f6e\u9806",
         WS_CAPTION | WS_SYSMENU | WS_POPUP,
         x,
         y,
@@ -1132,28 +1274,6 @@ bool edit_media_order(std::vector<std::wstring>& files) {
     return state.accepted;
 }
 
-enum class MediaDestination {
-    game,
-    bottom_right,
-};
-
-struct SequenceMedia {
-    std::wstring path;
-    int length = 1;
-};
-
-int media_sequence_length(const EDIT_INFO& info, const MEDIA_INFO& media) {
-    const double frames_per_second = info.rate > 0 && info.scale > 0
-        ? static_cast<double>(info.rate) / static_cast<double>(info.scale)
-        : 30.0;
-    const double seconds = media.total_time > 0.0 ? media.total_time : 5.0;
-    const double frames = std::ceil(seconds * frames_per_second);
-    return static_cast<int>(std::clamp(
-        frames,
-        1.0,
-        static_cast<double>((std::numeric_limits<int>::max)() / 4)));
-}
-
 bool calculate_media_targets(
     int scene_width,
     int scene_height,
@@ -1190,6 +1310,228 @@ bool calculate_media_targets(
     return true;
 }
 
+std::vector<MediaOrderItem> collect_placed_media_items(
+    EDIT_SECTION* edit,
+    OBJECT_HANDLE template_object,
+    MediaDestination destination,
+    int& out_target_layer) {
+    out_target_layer = -1;
+    if (!edit || !edit->info || !template_object || !edit->get_object_layer_frame || !edit->find_object) {
+        return {};
+    }
+
+    const OBJECT_LAYER_FRAME template_range = edit->get_object_layer_frame(template_object);
+    const LPCWSTR target_name = destination == MediaDestination::game
+        ? L"biim: \u30b2\u30fc\u30e0\u7d20\u6750"
+        : L"biim: \u53f3\u4e0b\u7d20\u6750";
+
+    std::vector<MediaOrderItem> items;
+    for (int layer = 0; layer <= edit->info->layer_max; ++layer) {
+        if (layer == template_range.layer) {
+            continue;
+        }
+        LPCWSTR layer_name = edit->get_layer_name ? edit->get_layer_name(layer) : nullptr;
+        const bool layer_matches = layer_name && std::wcscmp(layer_name, target_name) == 0;
+
+        int frame = template_range.start;
+        while (frame <= template_range.end) {
+            OBJECT_HANDLE obj = edit->find_object(layer, frame);
+            if (!obj) {
+                break;
+            }
+            OBJECT_LAYER_FRAME obj_range = edit->get_object_layer_frame(obj);
+            if (obj_range.start > template_range.end) {
+                break;
+            }
+
+            LPCWSTR obj_name = edit->get_object_name ? edit->get_object_name(obj) : nullptr;
+            const bool obj_matches = obj_name && std::wcscmp(obj_name, target_name) == 0;
+
+            if (obj_matches || (layer_matches && (!obj_name || !*obj_name))) {
+                MediaOrderItem item{};
+                item.handle = obj;
+                item.length = std::max(1, obj_range.end - obj_range.start + 1);
+                item.path = get_media_object_path(edit, obj);
+                items.push_back(std::move(item));
+                if (out_target_layer < 0) {
+                    out_target_layer = layer;
+                }
+            }
+
+            if (obj_range.end < frame) {
+                frame++;
+            } else {
+                frame = obj_range.end + 1;
+            }
+        }
+        if (!items.empty() && out_target_layer >= 0) {
+            break;
+        }
+    }
+    return items;
+}
+
+bool apply_media_sequence_items(
+    EDIT_SECTION* edit,
+    OBJECT_HANDLE template_object,
+    MediaDestination destination,
+    int target_layer,
+    const std::vector<MediaOrderItem>& initial_items,
+    const std::vector<MediaOrderItem>& final_items) {
+    if (!edit || !edit->info || !template_object || final_items.empty() ||
+        !edit->get_object_layer_frame) {
+        return false;
+    }
+
+    OBJECT_LAYER_FRAME template_range = edit->get_object_layer_frame(template_object);
+    std::int64_t total_length = 0;
+    for (const auto& item : final_items) {
+        if (total_length > (std::numeric_limits<int>::max)() - item.length) {
+            show_media_message(L"\u7d20\u6750\u306e\u5408\u8a08\u6642\u9593\u304c\u9577\u3059\u304e\u307e\u3059\u3002");
+            return false;
+        }
+        total_length += item.length;
+    }
+
+    if (total_length <= 0 ||
+        total_length > (std::numeric_limits<int>::max)() - template_range.start) {
+        show_media_message(L"\u7d20\u6750\u306e\u5408\u8a08\u6642\u9593\u304c\u9577\u3059\u304e\u307e\u3059\u3002");
+        return false;
+    }
+
+    const int desired_end = template_range.start + static_cast<int>(total_length) - 1;
+    if (desired_end > template_range.end) {
+        if (edit->get_object_section_num && edit->move_object_section) {
+            edit->move_object_section(
+                template_object,
+                edit->get_object_section_num(template_object),
+                desired_end);
+            template_range.end = desired_end;
+        }
+    }
+
+    MediaTarget game_target{};
+    MediaTarget bottom_right_target{};
+    if (!calculate_media_targets(
+            edit->info->width, edit->info->height, game_target, bottom_right_target)) {
+        return false;
+    }
+    const MediaTarget& target = destination == MediaDestination::game
+        ? game_target
+        : bottom_right_target;
+
+    const LPCWSTR object_name = destination == MediaDestination::game
+        ? L"biim: \u30b2\u30fc\u30e0\u7d20\u6750"
+        : L"biim: \u53f3\u4e0b\u7d20\u6750";
+
+    if (target_layer < 0) {
+        std::vector<int> media_layers;
+        if (!prepare_media_layers(edit, template_object, template_range, 1, media_layers)) {
+            show_media_message(
+                L"\u7d20\u6750\u3092\u7f6e\u304f\u80cc\u9762\u30ec\u30a4\u30e4\u30fc\u3092\u7528\u610f\u3067\u304d\u307e\u305b\u3093\u3067\u3057\u305f\u3002");
+            return false;
+        }
+        target_layer = media_layers.front();
+    }
+
+    if (edit->delete_object) {
+        for (const auto& init : initial_items) {
+            if (init.handle) {
+                bool kept = false;
+                for (const auto& item : final_items) {
+                    if (item.handle == init.handle) {
+                        kept = true;
+                        break;
+                    }
+                }
+                if (!kept) {
+                    edit->delete_object(init.handle);
+                }
+            }
+        }
+    }
+
+    const int temp_layer = edit->info->layer_max + 1;
+    bool evacuated = true;
+    int temp_offset = 0;
+    if (edit->move_object) {
+        for (const auto& item : final_items) {
+            if (item.handle) {
+                if (!edit->move_object(item.handle, temp_layer, template_range.start + temp_offset)) {
+                    evacuated = false;
+                    break;
+                }
+                temp_offset += item.length + 10;
+            }
+        }
+    } else {
+        evacuated = false;
+    }
+
+    int frame = template_range.start;
+    int placed = 0;
+
+    if (evacuated) {
+        for (const auto& item : final_items) {
+            if (item.handle) {
+                if (edit->move_object(item.handle, target_layer, frame)) {
+                    ++placed;
+                }
+            } else if (!item.path.empty()) {
+                if (create_media_object(
+                        edit,
+                        item.path.c_str(),
+                        target_layer,
+                        frame,
+                        item.length,
+                        target,
+                        object_name,
+                        object_name)) {
+                    ++placed;
+                }
+            }
+            frame += item.length;
+        }
+    } else {
+        if (edit->delete_object) {
+            for (const auto& item : final_items) {
+                if (item.handle) {
+                    edit->delete_object(item.handle);
+                }
+            }
+        }
+        for (const auto& item : final_items) {
+            if (!item.path.empty()) {
+                if (create_media_object(
+                        edit,
+                        item.path.c_str(),
+                        target_layer,
+                        frame,
+                        item.length,
+                        target,
+                        object_name,
+                        object_name)) {
+                    ++placed;
+                }
+            }
+            frame += item.length;
+        }
+    }
+
+    if (destination == MediaDestination::bottom_right && placed > 0) {
+        bottom_right_transparent.value = true;
+        if (edit->set_object_item_value) {
+            edit->set_object_item_value(
+                template_object,
+                L"Biim Template",
+                L"\u53f3\u4e0b\u6b04\u3092\u900f\u904e",
+                "1");
+        }
+    }
+
+    return placed > 0;
+}
+
 void place_media_sequence(EDIT_SECTION* edit, MediaDestination destination) {
     if (!edit || !edit->info || !edit->get_focus_object ||
         !edit->get_object_layer_frame || !edit->find_object) {
@@ -1204,117 +1546,107 @@ void place_media_sequence(EDIT_SECTION* edit, MediaDestination destination) {
     }
 
     std::vector<std::wstring> selected_files = open_media_file_dialog();
-    if (selected_files.empty() || !edit_media_order(selected_files)) {
+    if (selected_files.empty()) {
         return;
     }
 
-    std::vector<SequenceMedia> media_files;
-    media_files.reserve(selected_files.size());
-    int skipped = 0;
-    std::int64_t total_length = 0;
+    int target_layer = -1;
+    std::vector<MediaOrderItem> items = collect_placed_media_items(
+        edit, template_object, destination, target_layer);
+    const std::vector<MediaOrderItem> initial_items = items;
+
     for (const auto& path : selected_files) {
+        int item_len = 150;
         MEDIA_INFO media{};
-        if ((edit->is_support_media_file && !edit->is_support_media_file(path.c_str(), true)) ||
-            !edit->get_media_info ||
-            !edit->get_media_info(path.c_str(), &media, sizeof(media)) ||
-            media.width <= 0 || media.height <= 0) {
-            ++skipped;
-            continue;
+        if (edit->get_media_info &&
+            edit->get_media_info(path.c_str(), &media, sizeof(media)) &&
+            media.width > 0 && media.height > 0) {
+            item_len = media_sequence_length(*edit->info, media);
         }
-        const int item_length = media_sequence_length(*edit->info, media);
-        if (total_length > (std::numeric_limits<int>::max)() - item_length) {
-            ++skipped;
-            continue;
-        }
-        total_length += item_length;
-        media_files.push_back({path, item_length});
+        MediaOrderItem item{};
+        item.handle = nullptr;
+        item.path = path;
+        item.length = item_len;
+        items.push_back(std::move(item));
     }
-    if (media_files.empty()) {
-        show_media_message(
-            L"\u8aad\u307f\u8fbc\u3081\u308b\u52d5\u753b\u30fb\u753b\u50cf\u304c\u3042\u308a\u307e\u305b\u3093\u3067\u3057\u305f\u3002");
+
+    const LPCWSTR title = destination == MediaDestination::game
+        ? L"\u30b2\u30fc\u30e0\u7d20\u6750\u306e\u914d\u7f6e\u9806"
+        : L"\u53f3\u4e0b\u7d20\u6750\u306e\u914d\u7f6e\u9806";
+
+    if (!edit_media_order_dialog(items, edit, title)) {
         return;
     }
 
-    OBJECT_LAYER_FRAME template_range = edit->get_object_layer_frame(template_object);
-    if (total_length <= 0 ||
-        total_length > (std::numeric_limits<int>::max)() - template_range.start) {
-        show_media_message(L"\u7d20\u6750\u306e\u5408\u8a08\u6642\u9593\u304c\u9577\u3059\u304e\u307e\u3059\u3002");
+    apply_media_sequence_items(
+        edit, template_object, destination, target_layer, initial_items, items);
+}
+
+void edit_media_sequence_order_entry(EDIT_SECTION* edit, MediaDestination destination) {
+    if (!edit || !edit->info || !edit->get_focus_object ||
+        !edit->get_object_layer_frame || !edit->find_object) {
         return;
     }
-    const int desired_end = template_range.start + static_cast<int>(total_length) - 1;
-    if (desired_end > template_range.end) {
-        if (!edit->get_object_section_num || !edit->move_object_section ||
-            !edit->move_object_section(
-                template_object,
-                edit->get_object_section_num(template_object),
-                desired_end)) {
-            show_media_message(
-                L"\u8907\u6570\u7d20\u6750\u306e\u9577\u3055\u307e\u3067\u30c6\u30f3\u30d7\u30ec\u30fc\u30c8\u3092\u4f38\u3070\u305b\u307e\u305b\u3093\u3067\u3057\u305f\u3002");
+
+    OBJECT_HANDLE template_object = edit->get_focus_object();
+    if (!template_object) {
+        show_media_message(
+            L"biim\u30c6\u30f3\u30d7\u30ec\u30fc\u30c8\u3092\u9078\u629e\u3057\u3066\u304b\u3089\u5b9f\u884c\u3057\u3066\u304f\u3060\u3055\u3044\u3002");
+        return;
+    }
+
+    int target_layer = -1;
+    std::vector<MediaOrderItem> items = collect_placed_media_items(
+        edit, template_object, destination, target_layer);
+
+    if (items.empty()) {
+        std::vector<std::wstring> selected = open_media_file_dialog();
+        if (selected.empty()) {
             return;
         }
-        template_range.end = desired_end;
-    }
-
-    MediaTarget game_target{};
-    MediaTarget bottom_right_target{};
-    if (!calculate_media_targets(
-            edit->info->width, edit->info->height, game_target, bottom_right_target)) {
-        return;
-    }
-    const MediaTarget& target = destination == MediaDestination::game
-        ? game_target
-        : bottom_right_target;
-
-    std::vector<int> media_layers;
-    if (!prepare_media_layers(edit, template_object, template_range, 1, media_layers)) {
-        show_media_message(
-            L"\u7d20\u6750\u3092\u7f6e\u304f\u80cc\u9762\u30ec\u30a4\u30e4\u30fc\u3092\u7528\u610f\u3067\u304d\u307e\u305b\u3093\u3067\u3057\u305f\u3002");
-        return;
-    }
-
-    const LPCWSTR object_name = destination == MediaDestination::game
-        ? L"biim: \u30b2\u30fc\u30e0\u7d20\u6750"
-        : L"biim: \u53f3\u4e0b\u7d20\u6750";
-    int frame = template_range.start;
-    int placed = 0;
-    for (const auto& media : media_files) {
-        if (create_media_object(
-                edit,
-                media.path.c_str(),
-                media_layers.front(),
-                frame,
-                media.length,
-                target,
-                object_name,
-                object_name)) {
-            ++placed;
-        }
-        frame += media.length;
-    }
-
-    if (destination == MediaDestination::bottom_right && placed > 0) {
-        bottom_right_transparent.value = true;
-        if (edit->set_object_item_value) {
-            edit->set_object_item_value(
-                template_object,
-                L"Biim Template",
-                L"\u53f3\u4e0b\u6b04\u3092\u900f\u904e",
-                "1");
+        for (const auto& path : selected) {
+            int item_len = 150;
+            MEDIA_INFO media{};
+            if (edit->get_media_info &&
+                edit->get_media_info(path.c_str(), &media, sizeof(media)) &&
+                media.width > 0 && media.height > 0) {
+                item_len = media_sequence_length(*edit->info, media);
+            }
+            MediaOrderItem item{};
+            item.handle = nullptr;
+            item.path = path;
+            item.length = item_len;
+            items.push_back(std::move(item));
         }
     }
-    if (placed != static_cast<int>(media_files.size()) || skipped > 0) {
-        show_media_message(
-            L"\u4e00\u90e8\u306e\u7d20\u6750\u3092\u8aad\u307f\u8fbc\u3081\u307e\u305b\u3093\u3067\u3057\u305f\u3002\n"
-            L"\u5bfe\u5fdc\u5f62\u5f0f\u306e\u52d5\u753b\u30fb\u753b\u50cf\u306f\u6642\u9593\u9806\u306b\u914d\u7f6e\u6e08\u307f\u3067\u3059\u3002");
+
+    const std::vector<MediaOrderItem> initial_items = items;
+    const LPCWSTR title = destination == MediaDestination::game
+        ? L"\u30b2\u30fc\u30e0\u7d20\u6750\u306e\u914d\u7f6e\u9806"
+        : L"\u53f3\u4e0b\u7d20\u6750\u306e\u914d\u7f6e\u9806";
+
+    if (!edit_media_order_dialog(items, edit, title)) {
+        return;
     }
+
+    apply_media_sequence_items(
+        edit, template_object, destination, target_layer, initial_items, items);
 }
 
 void place_game_media_sequence(EDIT_SECTION* edit) {
     place_media_sequence(edit, MediaDestination::game);
 }
 
+void edit_game_media_order(EDIT_SECTION* edit) {
+    edit_media_sequence_order_entry(edit, MediaDestination::game);
+}
+
 void place_bottom_right_media_sequence(EDIT_SECTION* edit) {
     place_media_sequence(edit, MediaDestination::bottom_right);
+}
+
+void edit_bottom_right_media_order(EDIT_SECTION* edit) {
+    edit_media_sequence_order_entry(edit, MediaDestination::bottom_right);
 }
 
 bool process_video(FILTER_PROC_VIDEO* video) {
