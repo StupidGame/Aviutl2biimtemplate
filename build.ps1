@@ -98,7 +98,8 @@ $compilerArguments = @(
     "/OUT:$output",
     "/PDB:$pdb",
     'user32.lib',
-    'gdi32.lib'
+    'gdi32.lib',
+    'comdlg32.lib'
 )
 
 & cl.exe @compilerArguments

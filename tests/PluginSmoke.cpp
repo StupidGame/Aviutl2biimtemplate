@@ -39,6 +39,16 @@ std::vector<CreatedMedia> created_media;
 std::vector<ItemChange> item_changes;
 std::vector<std::wstring> object_names;
 std::vector<std::wstring> layer_names;
+OBJECT_LAYER_FRAME focused_range{4, 12, 111};
+int media_video_tracks = 1;
+
+struct ObjectMove {
+    OBJECT_HANDLE object = nullptr;
+    int layer = 0;
+    int frame = 0;
+};
+
+std::vector<ObjectMove> object_moves;
 
 void capture_image(const PIXEL_RGBA* pixels, int width, int height) {
     captured_width = width;
@@ -94,11 +104,24 @@ OBJECT_HANDLE mock_focus_object() {
 }
 
 OBJECT_LAYER_FRAME mock_object_range(OBJECT_HANDLE) {
-    return {4, 12, 111};
+    return focused_range;
+}
+
+OBJECT_HANDLE mock_find_object(int, int) {
+    return nullptr;
+}
+
+bool mock_layer_lock(int) {
+    return false;
+}
+
+bool mock_move_object(OBJECT_HANDLE object, int layer, int frame) {
+    object_moves.push_back({object, layer, frame});
+    return true;
 }
 
 bool mock_media_info(LPCWSTR, MEDIA_INFO* info, int) {
-    info->video_track_num = 1;
+    info->video_track_num = media_video_tracks;
     info->audio_track_num = 1;
     info->total_time = 10.0;
     info->width = 1920;
@@ -114,6 +137,28 @@ OBJECT_HANDLE mock_create_media(LPCWSTR path, int layer, int frame, int length) 
 
 bool mock_set_item(OBJECT_HANDLE object, LPCWSTR effect, LPCWSTR item, LPCSTR value) {
     item_changes.push_back({object, effect, item, value});
+    return true;
+}
+
+int mock_effect_list(OBJECT_HANDLE object, EFFECT_HANDLE* effects, int count) {
+    if (!effects || count <= 0) {
+        return 1;
+    }
+    effects[0] = reinterpret_cast<EFFECT_HANDLE>(object);
+    return 1;
+}
+
+LPCSTR mock_get_effect_item(EFFECT_HANDLE, LPCWSTR item) {
+    if (std::wcscmp(item, L"X") == 0 || std::wcscmp(item, L"Y") == 0 ||
+        std::wcscmp(item, L"\u62e1\u5927\u7387") == 0) {
+        return "0";
+    }
+    return nullptr;
+}
+
+bool mock_set_effect_item(EFFECT_HANDLE effect, LPCWSTR item, LPCSTR value) {
+    item_changes.push_back({
+        reinterpret_cast<OBJECT_HANDLE>(effect), L"\u6a19\u6e96\u63cf\u753b", item, value});
     return true;
 }
 
@@ -162,7 +207,7 @@ int wmain(int argc, wchar_t** argv) {
         FreeLibrary(module);
         return fail("one or more required exports are missing");
     }
-    if (required() == 0 || !initialize(required())) {
+    if (required() < 2010200 || !initialize(required())) {
         FreeLibrary(module);
         return fail("plugin initialization failed");
     }
@@ -231,7 +276,12 @@ int wmain(int argc, wchar_t** argv) {
         table, L"\u53f3\u4e0b\u306e\u52d5\u753b\u30fb\u753b\u50cf", L"file"));
     auto* place_button = static_cast<FILTER_ITEM_BUTTON*>(find_filter_item(
         table, L"\u9078\u3093\u3060\u7d20\u6750\u3092\u914d\u7f6e", L"button"));
-    if (result == 0 && (!game_file || !bottom_right_file || !place_button)) {
+    auto* game_sequence_button = static_cast<FILTER_ITEM_BUTTON*>(find_filter_item(
+        table, L"\u30b2\u30fc\u30e0\u6b04\u3078\u8907\u6570\u7d20\u6750\u3092\u8ffd\u52a0", L"button"));
+    auto* bottom_right_sequence_button = static_cast<FILTER_ITEM_BUTTON*>(find_filter_item(
+        table, L"\u53f3\u4e0b\u6b04\u3078\u8907\u6570\u7d20\u6750\u3092\u8ffd\u52a0", L"button"));
+    if (result == 0 && (!game_file || !bottom_right_file || !place_button ||
+                        !game_sequence_button || !bottom_right_sequence_button)) {
         result = fail("the media controls are missing");
     }
 
@@ -246,19 +296,25 @@ int wmain(int argc, wchar_t** argv) {
         edit_info.layer_max = 4;
         EDIT_SECTION edit{};
         edit.info = &edit_info;
+        edit.find_object = mock_find_object;
         edit.get_focus_object = mock_focus_object;
         edit.get_object_layer_frame = mock_object_range;
         edit.get_media_info = mock_media_info;
         edit.create_object_from_media_file = mock_create_media;
         edit.set_object_item_value = mock_set_item;
+        edit.get_effect_list = mock_effect_list;
+        edit.get_effect_item_value = mock_get_effect_item;
+        edit.set_effect_item_value = mock_set_effect_item;
         edit.set_object_name = mock_set_object_name;
         edit.set_layer_name = mock_set_layer_name;
+        edit.get_layer_lock = mock_layer_lock;
+        edit.move_object = mock_move_object;
         place_button->callback(&edit);
 
         if (created_media.size() != 2 || item_changes.size() != 6 ||
             object_names.size() != 2 || layer_names.size() != 2) {
             result = fail("the media placement callback did not create and configure two objects");
-        } else if (created_media[0].layer != 5 || created_media[1].layer != 7 ||
+        } else if (created_media[0].layer != 3 || created_media[1].layer != 2 ||
                    created_media[0].frame != 12 || created_media[1].frame != 12 ||
                    created_media[0].length != 100 || created_media[1].length != 100) {
             result = fail("the created media object ranges are incorrect");
@@ -274,6 +330,48 @@ int wmain(int argc, wchar_t** argv) {
             result = fail("the bottom-right media fit is incorrect");
         } else if (!table->func_proc_video(&video) || !has_alpha_at(1200, 650, false)) {
             result = fail("the bottom-right media window is not transparent");
+        }
+    }
+
+    if (result == 0) {
+        created_media.clear();
+        item_changes.clear();
+        object_names.clear();
+        layer_names.clear();
+        object_moves.clear();
+        focused_range = {0, 20, 29};
+        media_video_tracks = 0;
+        game_file->value = L"C:\\media\\still.png";
+        bottom_right_file->value = L"";
+
+        EDIT_INFO top_edit_info{};
+        top_edit_info.width = 1280;
+        top_edit_info.height = 720;
+        top_edit_info.frame = 20;
+        top_edit_info.layer = 0;
+        top_edit_info.layer_max = 0;
+        EDIT_SECTION top_edit{};
+        top_edit.info = &top_edit_info;
+        top_edit.find_object = mock_find_object;
+        top_edit.get_focus_object = mock_focus_object;
+        top_edit.get_object_layer_frame = mock_object_range;
+        top_edit.get_media_info = mock_media_info;
+        top_edit.create_object_from_media_file = mock_create_media;
+        top_edit.set_object_item_value = mock_set_item;
+        top_edit.set_object_name = mock_set_object_name;
+        top_edit.set_layer_name = mock_set_layer_name;
+        top_edit.get_layer_lock = mock_layer_lock;
+        top_edit.move_object = mock_move_object;
+        place_button->callback(&top_edit);
+
+        if (object_moves.size() != 1 || object_moves[0].layer != 1 ||
+            object_moves[0].frame != 20) {
+            result = fail("the template was not moved in front of media at the top layer");
+        } else if (created_media.size() != 1 || created_media[0].layer != 0 ||
+                   created_media[0].frame != 20 || created_media[0].length != 10) {
+            result = fail("an image without a video track was not placed behind the template");
+        } else if (item_changes.size() != 3) {
+            result = fail("the top-layer image was not fitted into the gameplay area");
         }
     }
 
