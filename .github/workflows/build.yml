@@ -1,0 +1,49 @@
+name: Build AviUtl2 plugin
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build x64 package
+    runs-on: windows-2022
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Build plugin and package
+        shell: pwsh
+        run: ./build.ps1 -DownloadSdk -RunTests
+
+      - name: Verify outputs
+        shell: pwsh
+        run: |
+          $plugin = Get-Item -LiteralPath ./dist/BiimTemplate.auf2
+          $package = Get-Item -LiteralPath ./dist/BiimTemplate.au2pkg.zip
+          if ($plugin.Length -le 0 -or $package.Length -le 0) {
+            throw "A build output is empty."
+          }
+          $entries = tar -tf $package.FullName
+          if ($entries -notcontains 'Plugin/BiimTemplate/BiimTemplate.auf2') {
+            throw "The install package does not contain the plugin."
+          }
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: BiimTemplate-AviUtl2-x64
+          path: |
+            dist/BiimTemplate.auf2
+            dist/BiimTemplate.au2pkg.zip
+          if-no-files-found: error

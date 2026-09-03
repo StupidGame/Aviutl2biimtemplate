@@ -1,0 +1,7 @@
+/build/
+/dist/
+/aviutl2_sdk/
+*.obj
+*.pdb
+*.exp
+*.lib
