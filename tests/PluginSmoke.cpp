@@ -2,11 +2,14 @@
 #include <windows.h>
 
 #include <cstddef>
+#include <cmath>
 #include <cstring>
+#include <cwchar>
 #include <iostream>
 #include <string>
 #include <vector>
 
+#include "plugin2.h"
 #include "filter2.h"
 
 namespace {
@@ -16,6 +19,26 @@ int captured_width = 0;
 int captured_height = 0;
 int anchor_width = 0;
 int anchor_height = 0;
+
+struct CreatedMedia {
+    std::wstring path;
+    int layer = 0;
+    int frame = 0;
+    int length = 0;
+    OBJECT_HANDLE handle = nullptr;
+};
+
+struct ItemChange {
+    OBJECT_HANDLE object = nullptr;
+    std::wstring effect;
+    std::wstring item;
+    std::string value;
+};
+
+std::vector<CreatedMedia> created_media;
+std::vector<ItemChange> item_changes;
+std::vector<std::wstring> object_names;
+std::vector<std::wstring> layer_names;
 
 void capture_image(const PIXEL_RGBA* pixels, int width, int height) {
     captured_width = width;
@@ -48,6 +71,71 @@ bool has_title_text_pixels() {
 int fail(const char* message) {
     std::cerr << "Smoke test failed: " << message << '\n';
     return 1;
+}
+
+struct ItemHeader {
+    LPCWSTR type;
+    LPCWSTR name;
+};
+
+void* find_filter_item(FILTER_PLUGIN_TABLE* table, LPCWSTR name, LPCWSTR type) {
+    for (void** item = table->items; item && *item; ++item) {
+        const auto* header = static_cast<const ItemHeader*>(*item);
+        if (header->name && header->type &&
+            std::wcscmp(header->name, name) == 0 && std::wcscmp(header->type, type) == 0) {
+            return *item;
+        }
+    }
+    return nullptr;
+}
+
+OBJECT_HANDLE mock_focus_object() {
+    return reinterpret_cast<OBJECT_HANDLE>(100);
+}
+
+OBJECT_LAYER_FRAME mock_object_range(OBJECT_HANDLE) {
+    return {4, 12, 111};
+}
+
+bool mock_media_info(LPCWSTR, MEDIA_INFO* info, int) {
+    info->video_track_num = 1;
+    info->audio_track_num = 1;
+    info->total_time = 10.0;
+    info->width = 1920;
+    info->height = 1080;
+    return true;
+}
+
+OBJECT_HANDLE mock_create_media(LPCWSTR path, int layer, int frame, int length) {
+    const auto handle = reinterpret_cast<OBJECT_HANDLE>(created_media.size() + 1);
+    created_media.push_back({path, layer, frame, length, handle});
+    return handle;
+}
+
+bool mock_set_item(OBJECT_HANDLE object, LPCWSTR effect, LPCWSTR item, LPCSTR value) {
+    item_changes.push_back({object, effect, item, value});
+    return true;
+}
+
+void mock_set_object_name(OBJECT_HANDLE, LPCWSTR name) {
+    object_names.emplace_back(name);
+}
+
+void mock_set_layer_name(int, LPCWSTR name) {
+    layer_names.emplace_back(name);
+}
+
+double changed_value(OBJECT_HANDLE object, LPCWSTR item) {
+    for (const auto& change : item_changes) {
+        if (change.object == object && change.item == item) {
+            return std::stod(change.value);
+        }
+    }
+    return 1.0e30;
+}
+
+bool approximately(double actual, double expected, double tolerance = 0.02) {
+    return std::abs(actual - expected) <= tolerance;
 }
 
 }  // namespace
@@ -125,6 +213,8 @@ int wmain(int argc, wchar_t** argv) {
         result = fail("the sidebar is transparent");
     } else if (!has_alpha_at(100, 650, true)) {
         result = fail("the bottom panel is transparent");
+    } else if (!has_alpha_at(1200, 650, true)) {
+        result = fail("the empty bottom-right panel is transparent");
     } else if (!has_alpha_at(960, 100, true)) {
         result = fail("the separator is transparent");
     } else if (!has_title_text_pixels()) {
@@ -133,6 +223,58 @@ int wmain(int argc, wchar_t** argv) {
                std::memcmp(captured_pixels.data(), first_frame.data(),
                            captured_pixels.size() * sizeof(PIXEL_RGBA)) != 0) {
         result = fail("the cached second frame differs from the first frame");
+    }
+
+    auto* game_file = static_cast<FILTER_ITEM_FILE*>(find_filter_item(
+        table, L"\u30b2\u30fc\u30e0\u6b04\u306e\u52d5\u753b\u30fb\u753b\u50cf", L"file"));
+    auto* bottom_right_file = static_cast<FILTER_ITEM_FILE*>(find_filter_item(
+        table, L"\u53f3\u4e0b\u306e\u52d5\u753b\u30fb\u753b\u50cf", L"file"));
+    auto* place_button = static_cast<FILTER_ITEM_BUTTON*>(find_filter_item(
+        table, L"\u9078\u3093\u3060\u7d20\u6750\u3092\u914d\u7f6e", L"button"));
+    if (result == 0 && (!game_file || !bottom_right_file || !place_button)) {
+        result = fail("the media controls are missing");
+    }
+
+    if (result == 0) {
+        game_file->value = L"C:\\media\\game.mp4";
+        bottom_right_file->value = L"C:\\media\\speaker.png";
+        EDIT_INFO edit_info{};
+        edit_info.width = 1280;
+        edit_info.height = 720;
+        edit_info.frame = 12;
+        edit_info.layer = 4;
+        edit_info.layer_max = 4;
+        EDIT_SECTION edit{};
+        edit.info = &edit_info;
+        edit.get_focus_object = mock_focus_object;
+        edit.get_object_layer_frame = mock_object_range;
+        edit.get_media_info = mock_media_info;
+        edit.create_object_from_media_file = mock_create_media;
+        edit.set_object_item_value = mock_set_item;
+        edit.set_object_name = mock_set_object_name;
+        edit.set_layer_name = mock_set_layer_name;
+        place_button->callback(&edit);
+
+        if (created_media.size() != 2 || item_changes.size() != 6 ||
+            object_names.size() != 2 || layer_names.size() != 2) {
+            result = fail("the media placement callback did not create and configure two objects");
+        } else if (created_media[0].layer != 5 || created_media[1].layer != 7 ||
+                   created_media[0].frame != 12 || created_media[1].frame != 12 ||
+                   created_media[0].length != 100 || created_media[1].length != 100) {
+            result = fail("the created media object ranges are incorrect");
+        } else if (!approximately(changed_value(created_media[0].handle, L"X"), -161.0) ||
+                   !approximately(changed_value(created_media[0].handle, L"Y"), -91.0) ||
+                   !approximately(changed_value(
+                       created_media[0].handle, L"\u62e1\u5927\u7387"), 49.8148)) {
+            result = fail("the gameplay media fit is incorrect");
+        } else if (!approximately(changed_value(created_media[1].handle, L"X"), 481.0) ||
+                   !approximately(changed_value(created_media[1].handle, L"Y"), 271.0) ||
+                   !approximately(changed_value(
+                       created_media[1].handle, L"\u62e1\u5927\u7387"), 16.4815)) {
+            result = fail("the bottom-right media fit is incorrect");
+        } else if (!table->func_proc_video(&video) || !has_alpha_at(1200, 650, false)) {
+            result = fail("the bottom-right media window is not transparent");
+        }
     }
 
     table->func_destroy(1, userdata);

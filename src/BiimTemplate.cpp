@@ -2,6 +2,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -11,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "plugin2.h"
 #include "filter2.h"
 
 namespace {
@@ -25,9 +27,21 @@ auto padding = FILTER_ITEM_TRACK(L"\u4f59\u767d (px)", 20.0, 0.0, 120.0, 1.0);
 auto separator_width = FILTER_ITEM_TRACK(L"\u533a\u5207\u308a\u7dda (px)", 4.0, 0.0, 32.0, 1.0);
 auto auto_scale = FILTER_ITEM_CHECK(L"720p\u57fa\u6e96\u3067\u62e1\u7e2e", true);
 
+void place_media_files(EDIT_SECTION* edit);
+
+auto media_group = FILTER_ITEM_GROUP(L"\u52d5\u753b\u30fb\u753b\u50cf");
+constexpr wchar_t media_file_filter[] =
+    L"Media Files (*.mp4;*.mkv;*.avi;*.mov;*.webm;*.png;*.jpg;*.jpeg;*.bmp;*.webp)\0"
+    L"*.mp4;*.mkv;*.avi;*.mov;*.webm;*.png;*.jpg;*.jpeg;*.bmp;*.webp\0"
+    L"All Files (*.*)\0*.*\0";
+auto game_media_file = FILTER_ITEM_FILE(L"\u30b2\u30fc\u30e0\u6b04\u306e\u52d5\u753b\u30fb\u753b\u50cf", L"", media_file_filter);
+auto bottom_right_media_file = FILTER_ITEM_FILE(L"\u53f3\u4e0b\u306e\u52d5\u753b\u30fb\u753b\u50cf", L"", media_file_filter);
+auto place_media_button = FILTER_ITEM_BUTTON(L"\u9078\u3093\u3060\u7d20\u6750\u3092\u914d\u7f6e", place_media_files);
+
 auto background_group = FILTER_ITEM_GROUP(L"\u80cc\u666f");
 auto sidebar_color = FILTER_ITEM_COLOR(L"\u53f3\u6b04\u306e\u80cc\u666f", 0x20242b);
 auto bottom_color = FILTER_ITEM_COLOR(L"\u4e0b\u6b04\u306e\u80cc\u666f", 0x17191f);
+auto bottom_right_color = FILTER_ITEM_COLOR(L"\u53f3\u4e0b\u6b04\u306e\u80cc\u666f", 0x111318);
 auto fill_game_area = FILTER_ITEM_CHECK(L"\u30b2\u30fc\u30e0\u6b04\u3092\u5857\u308b", false);
 auto game_color = FILTER_ITEM_COLOR(L"\u30b2\u30fc\u30e0\u6b04\u306e\u8272", 0x000000);
 auto panel_opacity = FILTER_ITEM_TRACK(L"\u80cc\u666f\u306e\u4e0d\u900f\u660e\u5ea6 (%)", 96.0, 0.0, 100.0, 1.0);
@@ -60,9 +74,14 @@ void* filter_items[] = {
     &padding,
     &separator_width,
     &auto_scale,
+    &media_group,
+    &game_media_file,
+    &bottom_right_media_file,
+    &place_media_button,
     &background_group,
     &sidebar_color,
     &bottom_color,
+    &bottom_right_color,
     &fill_game_area,
     &game_color,
     &panel_opacity,
@@ -101,10 +120,12 @@ struct Settings {
     bool scale_from_720p = true;
     Rgb sidebar_background{};
     Rgb bottom_background{};
+    Rgb bottom_right_background{};
     bool fill_game = false;
     Rgb game_background{};
     int background_opacity = 96;
     Rgb separator{};
+    std::wstring bottom_right_media;
     std::wstring title;
     std::wstring side_text;
     std::wstring speaker;
@@ -153,10 +174,12 @@ Settings read_settings() {
     result.scale_from_720p = auto_scale.value;
     result.sidebar_background = read_color(sidebar_color);
     result.bottom_background = read_color(bottom_color);
+    result.bottom_right_background = read_color(bottom_right_color);
     result.fill_game = fill_game_area.value;
     result.game_background = read_color(game_color);
     result.background_opacity = std::clamp(rounded_track(panel_opacity.value), 0, 100);
     result.separator = read_color(separator_color);
+    result.bottom_right_media = read_text(bottom_right_media_file.value);
     result.title = read_text(sidebar_title.value);
     result.side_text = read_text(sidebar_text.value);
     result.speaker = read_text(speaker_name.value);
@@ -408,10 +431,14 @@ bool render_template(RenderCache& cache, const Settings& settings, int width, in
         fill_rectangle(cache.pixels, width, height, 0, 0, game_right, game_bottom,
                        settings.game_background, panel_alpha);
     }
-    fill_rectangle(cache.pixels, width, height, game_right, 0, width, height,
+    fill_rectangle(cache.pixels, width, height, game_right, 0, width, game_bottom,
                    settings.sidebar_background, panel_alpha);
     fill_rectangle(cache.pixels, width, height, 0, game_bottom, game_right, height,
                    settings.bottom_background, panel_alpha);
+    if (settings.bottom_right_media.empty()) {
+        fill_rectangle(cache.pixels, width, height, game_right, game_bottom, width, height,
+                       settings.bottom_right_background, panel_alpha);
+    }
 
     if (scaled_separator > 0) {
         const int left_half = scaled_separator / 2;
@@ -437,7 +464,7 @@ bool render_template(RenderCache& cache, const Settings& settings, int width, in
     const int sidebar_left = std::clamp(game_right + scaled_padding, 0, width);
     const int sidebar_right = std::clamp(width - scaled_padding, 0, width);
     const int sidebar_top = std::clamp(scaled_padding, 0, height);
-    const int sidebar_bottom = std::clamp(height - scaled_padding, 0, height);
+    const int sidebar_bottom = std::clamp(game_bottom - scaled_padding, 0, height);
     const int title_height = std::max(title_size + scaled_padding / 2,
                                       static_cast<int>(std::lround(title_size * 1.55)));
     const int title_bottom = std::min(sidebar_bottom, sidebar_top + title_height);
@@ -495,6 +522,201 @@ bool render_template(RenderCache& cache, const Settings& settings, int width, in
     return true;
 }
 
+struct MediaTarget {
+    double left = 0.0;
+    double top = 0.0;
+    double right = 0.0;
+    double bottom = 0.0;
+};
+
+std::string format_number(double value) {
+    char buffer[64]{};
+    const auto result = std::to_chars(
+        std::begin(buffer), std::end(buffer) - 1, value, std::chars_format::fixed, 4);
+    if (result.ec != std::errc{}) {
+        return "0";
+    }
+    return std::string(buffer, result.ptr);
+}
+
+bool set_standard_drawing_value(
+    EDIT_SECTION* edit,
+    OBJECT_HANDLE object,
+    LPCWSTR item,
+    double value) {
+    if (!edit || !edit->set_object_item_value || !object) {
+        return false;
+    }
+    const std::string formatted = format_number(value);
+    return edit->set_object_item_value(
+        object,
+        L"\u6a19\u6e96\u63cf\u753b",
+        item,
+        formatted.c_str());
+}
+
+bool fit_media_object(
+    EDIT_SECTION* edit,
+    OBJECT_HANDLE object,
+    const MEDIA_INFO& media,
+    const MediaTarget& target,
+    int scene_width,
+    int scene_height) {
+    const double target_width = target.right - target.left;
+    const double target_height = target.bottom - target.top;
+    if (media.width <= 0 || media.height <= 0 || target_width <= 0.0 || target_height <= 0.0) {
+        return false;
+    }
+
+    const double scale = std::min(
+        target_width / static_cast<double>(media.width),
+        target_height / static_cast<double>(media.height));
+    const double center_x = (target.left + target.right) * 0.5 - scene_width * 0.5;
+    const double center_y = (target.top + target.bottom) * 0.5 - scene_height * 0.5;
+
+    const bool x_set = set_standard_drawing_value(edit, object, L"X", center_x);
+    const bool y_set = set_standard_drawing_value(edit, object, L"Y", center_y);
+    const bool scale_set = set_standard_drawing_value(
+        edit, object, L"\u62e1\u5927\u7387", scale * 100.0);
+    return x_set && y_set && scale_set;
+}
+
+bool create_media_object(
+    EDIT_SECTION* edit,
+    LPCWSTR path,
+    int layer,
+    int frame,
+    int length,
+    const MediaTarget& target,
+    LPCWSTR object_name,
+    LPCWSTR layer_name) {
+    if (!path || !*path || !edit || !edit->get_media_info ||
+        !edit->create_object_from_media_file || !edit->info) {
+        return false;
+    }
+
+    MEDIA_INFO media{};
+    if (!edit->get_media_info(path, &media, sizeof(media)) ||
+        media.video_track_num <= 0 || media.width <= 0 || media.height <= 0) {
+        return false;
+    }
+
+    OBJECT_HANDLE object = edit->create_object_from_media_file(path, layer, frame, length);
+    if (!object) {
+        return false;
+    }
+
+    if (edit->set_object_name) {
+        edit->set_object_name(object, object_name);
+    }
+    if (edit->set_layer_name) {
+        edit->set_layer_name(layer, layer_name);
+    }
+
+    return fit_media_object(
+        edit, object, media, target, edit->info->width, edit->info->height);
+}
+
+void show_media_message(LPCWSTR message) {
+    MessageBoxW(
+        GetActiveWindow(),
+        message,
+        L"biim\u30c6\u30f3\u30d7\u30ec\u30fc\u30c8",
+        MB_OK | MB_ICONINFORMATION);
+}
+
+void place_media_files(EDIT_SECTION* edit) {
+    if (!edit || !edit->info || !edit->get_focus_object || !edit->get_object_layer_frame) {
+        return;
+    }
+
+    const bool has_game_media = game_media_file.value && *game_media_file.value;
+    const bool has_bottom_right_media = bottom_right_media_file.value && *bottom_right_media_file.value;
+    if (!has_game_media && !has_bottom_right_media) {
+        show_media_message(
+            L"\u52d5\u753b\u307e\u305f\u306f\u753b\u50cf\u3092\u9078\u3093\u3067\u304b\u3089\u914d\u7f6e\u3057\u3066\u304f\u3060\u3055\u3044\u3002");
+        return;
+    }
+
+    OBJECT_HANDLE template_object = edit->get_focus_object();
+    if (!template_object) {
+        show_media_message(
+            L"biim\u30c6\u30f3\u30d7\u30ec\u30fc\u30c8\u3092\u9078\u629e\u3057\u3066\u304b\u3089\u5b9f\u884c\u3057\u3066\u304f\u3060\u3055\u3044\u3002");
+        return;
+    }
+
+    const OBJECT_LAYER_FRAME template_range = edit->get_object_layer_frame(template_object);
+    const int length = std::max(1, template_range.end - template_range.start + 1);
+    const int scene_width = edit->info->width;
+    const int scene_height = edit->info->height;
+    if (scene_width <= 0 || scene_height <= 0) {
+        return;
+    }
+
+    const int game_right = scene_width - std::clamp(
+        static_cast<int>(std::lround(scene_width * sidebar_width.value / 100.0)), 1, scene_width);
+    const int game_bottom = scene_height - std::clamp(
+        static_cast<int>(std::lround(scene_height * bottom_height.value / 100.0)), 1, scene_height);
+    const double resolution_scale = auto_scale.value
+        ? std::clamp(static_cast<double>(scene_height) / 720.0, 0.25, 8.0)
+        : 1.0;
+    const int line_width = std::max(0, static_cast<int>(std::lround(separator_width.value * resolution_scale)));
+    const int left_half = line_width / 2;
+    const int right_half = line_width - left_half;
+
+    const MediaTarget game_target{
+        0.0,
+        0.0,
+        static_cast<double>(std::max(1, game_right - left_half)),
+        static_cast<double>(std::max(1, game_bottom - left_half)),
+    };
+    const MediaTarget bottom_right_target{
+        static_cast<double>(std::min(scene_width, game_right + right_half)),
+        static_cast<double>(std::min(scene_height, game_bottom + right_half)),
+        static_cast<double>(scene_width),
+        static_cast<double>(scene_height),
+    };
+
+    int next_layer = std::max(template_range.layer + 1, edit->info->layer_max + 1);
+    int requested = 0;
+    int placed = 0;
+    if (has_game_media) {
+        ++requested;
+        if (create_media_object(
+                edit,
+                game_media_file.value,
+                next_layer,
+                template_range.start,
+                length,
+                game_target,
+                L"biim: \u30b2\u30fc\u30e0\u7d20\u6750",
+                L"biim: \u30b2\u30fc\u30e0\u7d20\u6750")) {
+            ++placed;
+        }
+        next_layer += 2;
+    }
+    if (has_bottom_right_media) {
+        ++requested;
+        if (create_media_object(
+                edit,
+                bottom_right_media_file.value,
+                next_layer,
+                template_range.start,
+                length,
+                bottom_right_target,
+                L"biim: \u53f3\u4e0b\u7d20\u6750",
+                L"biim: \u53f3\u4e0b\u7d20\u6750")) {
+            ++placed;
+        }
+    }
+
+    if (placed != requested) {
+        show_media_message(
+            L"\u4e00\u90e8\u306e\u7d20\u6750\u3092\u914d\u7f6e\u3067\u304d\u307e\u305b\u3093\u3067\u3057\u305f\u3002\n"
+            L"\u5bfe\u5fdc\u5f62\u5f0f\u3068\u7a7a\u304d\u30ec\u30a4\u30e4\u30fc\u3092\u78ba\u8a8d\u3057\u3066\u304f\u3060\u3055\u3044\u3002");
+    }
+}
+
 bool process_video(FILTER_PROC_VIDEO* video) {
     if (!video || !video->scene || !video->set_image_data || !video->userdata) {
         return false;
@@ -534,7 +756,7 @@ FILTER_PLUGIN_TABLE plugin_table = {
         FILTER_PLUGIN_TABLE::FLAG_USERDATA,
     L"Biim Template",
     L"biim\u30c6\u30f3\u30d7\u30ec\u30fc\u30c8",
-    L"Biim Template for AviUtl2 version 1.0.0",
+    L"Biim Template for AviUtl2 version 1.1.0",
     filter_items,
     process_video,
     nullptr,

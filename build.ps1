@@ -30,7 +30,8 @@ if (-not $vcvars) {
 $source = Join-Path $projectRoot 'src\BiimTemplate.cpp'
 $sdkInclude = Join-Path $projectRoot 'aviutl2_sdk'
 $sdkHeader = Join-Path $sdkInclude 'filter2.h'
-if ($DownloadSdk -or -not (Test-Path -LiteralPath $sdkHeader)) {
+$sdkPluginHeader = Join-Path $sdkInclude 'plugin2.h'
+if ($DownloadSdk -or -not (Test-Path -LiteralPath $sdkHeader) -or -not (Test-Path -LiteralPath $sdkPluginHeader)) {
     $sdkUri = 'https://spring-fragrance.mints.ne.jp/aviutl/aviutl2_sdk.zip'
     $sdkSha256 = '747EF1FB59DAC4DC1B3D54489BFBF968C18CAFE4A977C0FC85C3B79702C6A1B7'
     $sdkArchive = Join-Path $buildDir 'aviutl2_sdk.zip'
