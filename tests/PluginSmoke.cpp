@@ -66,6 +66,11 @@ bool has_alpha_at(int x, int y, bool expected_visible) {
     return expected_visible ? pixel.a > 0 : pixel.a == 0;
 }
 
+bool pixels_equal(const std::vector<PIXEL_RGBA>& a, const std::vector<PIXEL_RGBA>& b) {
+    return a.size() == b.size() &&
+           std::memcmp(a.data(), b.data(), a.size() * sizeof(PIXEL_RGBA)) == 0;
+}
+
 bool has_title_text_pixels() {
     for (int y = 0; y < 100; ++y) {
         for (int x = 970; x < 1270; ++x) {
@@ -193,8 +198,18 @@ bool mock_move_object(OBJECT_HANDLE object, int layer, int frame) {
 }
 
 int mock_moved_section_frame = -1;
+int mock_custom_section_count = 1;
+std::vector<int> mock_section_frames;
+
 int mock_get_object_section_num(OBJECT_HANDLE) {
-    return 1;
+    return mock_custom_section_count;
+}
+
+int mock_get_object_section_frame(OBJECT_HANDLE, int section) {
+    if (section >= 0 && section < static_cast<int>(mock_section_frames.size())) {
+        return mock_section_frames[static_cast<std::size_t>(section)];
+    }
+    return 0;
 }
 
 bool mock_move_object_section(OBJECT_HANDLE object, int, int frame) {
@@ -530,6 +545,7 @@ int wmain(int argc, wchar_t** argv) {
         adjust_edit.get_layer_lock = mock_layer_lock;
         adjust_edit.move_object = mock_move_object;
         adjust_edit.get_object_section_num = mock_get_object_section_num;
+        adjust_edit.get_object_section_frame = mock_get_object_section_frame;
         adjust_edit.move_object_section = mock_move_object_section;
 
         SetEnvironmentVariableW(L"BIIM_TEMPLATE_HEADLESS_TEST", L"1");
@@ -674,6 +690,152 @@ int wmain(int argc, wchar_t** argv) {
                     result = fail("order_select_timeline_id did not set focus, cursor, and display frame to the split clip");
                 }
                 SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_SELECT_INDEX", nullptr);
+            }
+
+            // Timeline split template sync test:
+            if (result == 0) {
+                mock_timeline_objects.clear();
+                const auto h_media = reinterpret_cast<OBJECT_HANDLE>(301);
+                mock_timeline_objects.push_back({h_media, 1, 10, 150, L"biim: \u30b2\u30fc\u30e0\u7d20\u6750", "file=\"C:\\media\\game.mp4\"\n"});
+
+                const auto h_tmpl1 = reinterpret_cast<OBJECT_HANDLE>(100);
+                const auto h_tmpl2 = reinterpret_cast<OBJECT_HANDLE>(302);
+                mock_timeline_objects.push_back({h_tmpl1, 2, 10, 49, L"biim\u30c6\u30f3\u30d7\u30ec\u30fc\u30c8", ""});
+                mock_timeline_objects.push_back({h_tmpl2, 2, 50, 89, L"biim\u30c6\u30f3\u30d7\u30ec\u30fc\u30c8", ""});
+
+                focused_range = {2, 10, 49};
+                mock_focused_obj = h_tmpl1;
+                mock_moved_section_frame = -1;
+
+                sync_to_media_button->callback(&adjust_edit);
+
+                if (mock_timeline_objects[2].end != 150 || mock_moved_section_frame != 150) {
+                    result = fail("sync_to_media_button did not extend the last split template piece to media end");
+                } else if (mock_timeline_objects[1].end != 49) {
+                    result = fail("sync_to_media_button clobbered earlier split template piece");
+                }
+            }
+
+            // Dynamic text switching tests:
+            if (result == 0) {
+                auto* caption_item = static_cast<FILTER_ITEM_TEXT*>(find_filter_item(
+                    table, L"\u4e0b\u6b04\u306e\u672c\u6587", L"text"));
+                auto* speaker_item = static_cast<FILTER_ITEM_STRING*>(find_filter_item(
+                    table, L"\u8a71\u8005\u540d", L"string"));
+                auto* title_item = static_cast<FILTER_ITEM_STRING*>(find_filter_item(
+                    table, L"\u53f3\u6b04\u306e\u898b\u51fa\u3057", L"string"));
+                auto* side_item = static_cast<FILTER_ITEM_TEXT*>(find_filter_item(
+                    table, L"\u53f3\u6b04\u306e\u672c\u6587", L"text"));
+
+                if (!caption_item || !speaker_item || !title_item || !side_item) {
+                    result = fail("text filter items not found");
+                } else {
+                    LPCWSTR orig_caption = caption_item->value;
+                    LPCWSTR orig_speaker = speaker_item->value;
+                    LPCWSTR orig_title = title_item->value;
+                    LPCWSTR orig_side = side_item->value;
+
+                    // Test A: Frame tags in caption and speaker override
+                    caption_item->value = L"[0F] Caption A\n[60F] Caption B\n[120F:SpeakerZ] Caption C";
+                    speaker_item->value = L"DefaultSpeaker";
+
+                    object.frame = 0;
+                    object.time = 0.0;
+                    table->func_proc_video(&video);
+                    auto pixels_f0 = captured_pixels;
+
+                    object.frame = 30;
+                    object.time = 0.5;
+                    table->func_proc_video(&video);
+                    if (!pixels_equal(captured_pixels, pixels_f0)) {
+                        result = fail("text changed prematurely before frame tag");
+                    }
+
+                    if (result == 0) {
+                        object.frame = 60;
+                        object.time = 1.0;
+                        table->func_proc_video(&video);
+                        auto pixels_f60 = captured_pixels;
+                        if (pixels_equal(pixels_f60, pixels_f0)) {
+                            result = fail("text did not change at [60F]");
+                        }
+
+                        if (result == 0) {
+                            object.frame = 120;
+                            object.time = 2.0;
+                            table->func_proc_video(&video);
+                            auto pixels_f120 = captured_pixels;
+                            if (pixels_equal(pixels_f120, pixels_f60) || pixels_equal(pixels_f120, pixels_f0)) {
+                                result = fail("text and speaker did not change at [120F:SpeakerZ]");
+                            }
+                        }
+                    }
+
+                    // Test B: Section separators with intermediate points
+                    if (result == 0) {
+                        caption_item->value = L"Sec 1 Text\n---\nSec 2 Text\n---\nSec 3 Text";
+                        mock_custom_section_count = 3;
+                        mock_section_frames = {0, 60, 120};
+                        video.edit = &adjust_edit;
+                        object.layer = 2;
+                        object.frame_s = 0;
+
+                        mock_timeline_objects.clear();
+                        const auto h_test_tmpl = reinterpret_cast<OBJECT_HANDLE>(100);
+                        mock_timeline_objects.push_back({h_test_tmpl, 2, 0, 200, L"biim\u30c6\u30f3\u30d7\u30ec\u30fc\u30c8", ""});
+
+                        object.frame = 10;
+                        object.time = 0.16;
+                        table->func_proc_video(&video);
+                        auto pixels_sec1 = captured_pixels;
+
+                        object.frame = 70;
+                        object.time = 1.16;
+                        table->func_proc_video(&video);
+                        auto pixels_sec2 = captured_pixels;
+                        if (pixels_equal(pixels_sec2, pixels_sec1)) {
+                            result = fail("caption did not change at intermediate point section 2");
+                        }
+
+                        if (result == 0) {
+                            object.frame = 130;
+                            object.time = 2.16;
+                            table->func_proc_video(&video);
+                            auto pixels_sec3 = captured_pixels;
+                            if (pixels_equal(pixels_sec3, pixels_sec2) || pixels_equal(pixels_sec3, pixels_sec1)) {
+                                result = fail("caption did not change at intermediate point section 3");
+                            }
+                        }
+                    }
+
+                    // Test C: Time tags [m:ss]
+                    if (result == 0) {
+                        caption_item->value = L"[0:00] Time 0s Text\n[0:02] Time 2s Text";
+                        mock_custom_section_count = 1;
+                        mock_section_frames.clear();
+                        video.edit = nullptr;
+
+                        object.frame = 0;
+                        object.time = 0.0;
+                        table->func_proc_video(&video);
+                        auto pixels_t0 = captured_pixels;
+
+                        object.frame = 120;
+                        object.time = 2.0;
+                        table->func_proc_video(&video);
+                        auto pixels_t2 = captured_pixels;
+                        if (pixels_equal(pixels_t2, pixels_t0)) {
+                            result = fail("caption did not change at [0:02] time tag");
+                        }
+                    }
+
+                    // Restore original filter values
+                    caption_item->value = orig_caption;
+                    speaker_item->value = orig_speaker;
+                    title_item->value = orig_title;
+                    side_item->value = orig_side;
+                    video.edit = nullptr;
+                }
             }
         }
 

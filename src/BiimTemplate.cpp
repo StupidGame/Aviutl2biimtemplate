@@ -407,6 +407,342 @@ void draw_text_block(
     DeleteObject(font);
 }
 
+bool is_separator_line(const std::wstring& line) {
+    if (line.empty()) return false;
+    std::size_t start = line.find_first_not_of(L" \t\r\n");
+    if (start == std::wstring::npos) return false;
+    std::size_t end = line.find_last_not_of(L" \t\r\n");
+    const std::wstring trimmed = line.substr(start, end - start + 1);
+    if (trimmed.size() < 3) return false;
+    bool all_dash = true;
+    bool all_equal = true;
+    for (wchar_t ch : trimmed) {
+        if (ch != L'-') all_dash = false;
+        if (ch != L'=') all_equal = false;
+    }
+    return all_dash || all_equal;
+}
+
+std::wstring trim_blank_lines(const std::wstring& text) {
+    if (text.empty()) return {};
+    std::size_t start = text.find_first_not_of(L" \t\r\n");
+    if (start == std::wstring::npos) return {};
+    std::size_t end = text.find_last_not_of(L" \t\r\n");
+    return text.substr(start, end - start + 1);
+}
+
+bool parse_time_or_section(
+    const std::wstring& spec,
+    int section_count,
+    int& out_sec,
+    int& out_frame,
+    double& out_time) {
+    out_sec = -1;
+    out_frame = -1;
+    out_time = -1.0;
+    if (spec.empty()) {
+        return false;
+    }
+
+    std::wstring s = spec;
+    std::size_t start = s.find_first_not_of(L" \t\r\n");
+    if (start != std::wstring::npos) {
+        std::size_t end = s.find_last_not_of(L" \t\r\n");
+        s = s.substr(start, end - start + 1);
+    }
+    if (s.empty()) {
+        return false;
+    }
+
+    if (s.rfind(L"\u533a\u9593", 0) == 0) {
+        s = s.substr(2);
+        out_sec = _wtoi(s.c_str());
+        return out_sec > 0;
+    }
+    if (s.size() >= 3 && (_wcsnicmp(s.c_str(), L"sec", 3) == 0)) {
+        s = s.substr(3);
+        out_sec = _wtoi(s.c_str());
+        return out_sec > 0;
+    }
+
+    if (s.size() > 1 && (s.back() == L's' || s.back() == L'S')) {
+        wchar_t* end_ptr = nullptr;
+        out_time = std::wcstod(s.substr(0, s.size() - 1).c_str(), &end_ptr);
+        return end_ptr && *end_ptr == L'\0' && out_time >= 0.0;
+    }
+
+    if (s.size() > 1 && (s.back() == L'f' || s.back() == L'F')) {
+        wchar_t* end_ptr = nullptr;
+        long val = std::wcstol(s.substr(0, s.size() - 1).c_str(), &end_ptr, 10);
+        if (end_ptr && *end_ptr == L'\0' && val >= 0) {
+            out_frame = static_cast<int>(val);
+            return true;
+        }
+        return false;
+    }
+
+    const std::size_t first_colon = s.find(L':');
+    if (first_colon != std::wstring::npos) {
+        const std::size_t second_colon = s.find(L':', first_colon + 1);
+        if (second_colon != std::wstring::npos) {
+            const std::wstring hr_str = s.substr(0, first_colon);
+            const std::wstring min_str = s.substr(first_colon + 1, second_colon - first_colon - 1);
+            const std::wstring sec_str = s.substr(second_colon + 1);
+            wchar_t* end_hr = nullptr;
+            wchar_t* end_min = nullptr;
+            wchar_t* end_sec = nullptr;
+            const double hr_val = std::wcstod(hr_str.c_str(), &end_hr);
+            const double min_val = std::wcstod(min_str.c_str(), &end_min);
+            const double sec_val = std::wcstod(sec_str.c_str(), &end_sec);
+            if (end_hr && *end_hr == L'\0' && end_min && *end_min == L'\0' && end_sec && *end_sec == L'\0') {
+                out_time = hr_val * 3600.0 + min_val * 60.0 + sec_val;
+                return out_time >= 0.0;
+            }
+        } else {
+            const std::wstring min_str = s.substr(0, first_colon);
+            const std::wstring sec_str = s.substr(first_colon + 1);
+            wchar_t* end_min = nullptr;
+            wchar_t* end_sec = nullptr;
+            const double min_val = std::wcstod(min_str.c_str(), &end_min);
+            const double sec_val = std::wcstod(sec_str.c_str(), &end_sec);
+            if (end_min && *end_min == L'\0' && end_sec && *end_sec == L'\0') {
+                out_time = min_val * 60.0 + sec_val;
+                return out_time >= 0.0;
+            }
+        }
+    }
+
+    wchar_t* end_ptr = nullptr;
+    long val = std::wcstol(s.c_str(), &end_ptr, 10);
+    if (end_ptr && *end_ptr == L'\0') {
+        if (val > 0 && section_count > 1 && val <= section_count) {
+            out_sec = static_cast<int>(val);
+            return true;
+        }
+        if (val >= 0) {
+            out_frame = static_cast<int>(val);
+            return true;
+        }
+    }
+
+    return false;
+}
+
+struct TimedTextEntry {
+    int section = -1;
+    int frame = -1;
+    double time = -1.0;
+    std::wstring speaker;
+    std::wstring text;
+};
+
+std::wstring resolve_timed_text(
+    const std::wstring& raw,
+    int current_frame,
+    double current_time,
+    int current_section,
+    int section_count,
+    std::wstring* out_speaker = nullptr,
+    double fps = 30.0) {
+    if (raw.empty()) {
+        return {};
+    }
+
+    if (raw.find(L'[') == std::wstring::npos &&
+        raw.find(L"---") == std::wstring::npos &&
+        raw.find(L"===") == std::wstring::npos) {
+        return raw;
+    }
+
+    std::vector<std::wstring> raw_lines;
+    {
+        std::size_t pos = 0;
+        while (pos < raw.size()) {
+            std::size_t next_line = raw.find_first_of(L"\r\n", pos);
+            if (next_line == std::wstring::npos) {
+                next_line = raw.size();
+            }
+            raw_lines.push_back(raw.substr(pos, next_line - pos));
+            pos = raw.find_first_not_of(L"\r\n", next_line);
+        }
+    }
+
+    bool has_sep = false;
+    for (const auto& line : raw_lines) {
+        if (is_separator_line(line)) {
+            has_sep = true;
+            break;
+        }
+    }
+
+    std::vector<TimedTextEntry> entries;
+
+    if (has_sep) {
+        std::wstring current_chunk;
+        int chunk_idx = 0;
+        auto finish_chunk = [&](const std::wstring& chunk) {
+            TimedTextEntry e{};
+            e.section = chunk_idx + 1;
+            std::wstring trimmed = trim_blank_lines(chunk);
+            if (!trimmed.empty() && trimmed.front() == L'[') {
+                std::size_t close_bracket = trimmed.find(L']');
+                if (close_bracket != std::wstring::npos) {
+                    std::wstring tag_body = trimmed.substr(1, close_bracket - 1);
+                    int s = -1, f = -1;
+                    double t = -1.0;
+                    if (parse_time_or_section(tag_body, section_count, s, f, t)) {
+                        if (s > 0) e.section = s;
+                        if (f >= 0) e.frame = f;
+                        if (t >= 0.0) e.time = t;
+                    } else {
+                        std::size_t last_col = tag_body.rfind(L':');
+                        if (last_col != std::wstring::npos &&
+                            parse_time_or_section(tag_body.substr(0, last_col), section_count, s, f, t)) {
+                            if (s > 0) e.section = s;
+                            if (f >= 0) e.frame = f;
+                            if (t >= 0.0) e.time = t;
+                            e.speaker = tag_body.substr(last_col + 1);
+                        } else {
+                            e.speaker = tag_body;
+                        }
+                    }
+                    trimmed = trim_blank_lines(trimmed.substr(close_bracket + 1));
+                }
+            }
+            e.text = std::move(trimmed);
+            entries.push_back(std::move(e));
+            ++chunk_idx;
+        };
+
+        for (const auto& line : raw_lines) {
+            if (is_separator_line(line)) {
+                finish_chunk(current_chunk);
+                current_chunk.clear();
+            } else {
+                if (!current_chunk.empty()) {
+                    current_chunk.push_back(L'\n');
+                }
+                current_chunk.append(line);
+            }
+        }
+        finish_chunk(current_chunk);
+    } else {
+        TimedTextEntry current_entry{};
+        bool has_entry = false;
+        std::wstring current_text;
+
+        for (const auto& line : raw_lines) {
+            std::size_t first_char = line.find_first_not_of(L" \t");
+            if (first_char != std::wstring::npos && line[first_char] == L'[') {
+                std::size_t close_bracket = line.find(L']', first_char + 1);
+                if (close_bracket != std::wstring::npos) {
+                    std::wstring tag_body = line.substr(first_char + 1, close_bracket - first_char - 1);
+                    int s = -1, f = -1;
+                    double t = -1.0;
+                    std::wstring spk;
+                    bool parsed = false;
+
+                    if (parse_time_or_section(tag_body, section_count, s, f, t)) {
+                        parsed = true;
+                    } else {
+                        std::size_t last_col = tag_body.rfind(L':');
+                        if (last_col != std::wstring::npos &&
+                            parse_time_or_section(tag_body.substr(0, last_col), section_count, s, f, t)) {
+                            spk = tag_body.substr(last_col + 1);
+                            parsed = true;
+                        } else {
+                            spk = tag_body;
+                            parsed = true;
+                        }
+                    }
+
+                    if (parsed) {
+                        if (has_entry) {
+                            current_entry.text = trim_blank_lines(current_text);
+                            entries.push_back(std::move(current_entry));
+                            current_entry = {};
+                            current_text.clear();
+                        }
+                        has_entry = true;
+                        current_entry.section = s;
+                        current_entry.frame = f;
+                        current_entry.time = t;
+                        current_entry.speaker = spk;
+
+                        std::wstring remainder = line.substr(close_bracket + 1);
+                        std::size_t r_start = remainder.find_first_not_of(L" \t");
+                        if (r_start != std::wstring::npos) {
+                            current_text.append(remainder.substr(r_start));
+                        }
+                        continue;
+                    }
+                }
+            }
+
+            if (!has_entry) {
+                has_entry = true;
+                current_entry.section = 1;
+                current_entry.frame = 0;
+            }
+            if (!current_text.empty()) {
+                current_text.push_back(L'\n');
+            }
+            current_text.append(line);
+        }
+
+        if (has_entry) {
+            current_entry.text = trim_blank_lines(current_text);
+            entries.push_back(std::move(current_entry));
+        }
+    }
+
+    if (entries.empty()) {
+        return raw;
+    }
+
+    int best_index = 0;
+    double best_pos = -1.0;
+
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        const auto& e = entries[i];
+        bool matches = false;
+        double pos = -1.0;
+
+        if (e.section > 0 && section_count > 1) {
+            if ((current_section + 1) >= e.section) {
+                matches = true;
+                pos = static_cast<double>(e.section) * 100000.0;
+            }
+        } else if (e.frame >= 0) {
+            if (current_frame >= e.frame) {
+                matches = true;
+                pos = static_cast<double>(e.frame);
+            }
+        } else if (e.time >= 0.0) {
+            if (current_time >= e.time) {
+                matches = true;
+                pos = e.time * (fps > 0 ? fps : 30.0);
+            }
+        } else if (e.section > 0 && section_count <= 1) {
+            if (i == 0) {
+                matches = true;
+                pos = 0.0;
+            }
+        }
+
+        if (matches && pos >= best_pos) {
+            best_pos = pos;
+            best_index = static_cast<int>(i);
+        }
+    }
+
+    const auto& best_entry = entries[static_cast<std::size_t>(best_index)];
+    if (out_speaker && !best_entry.speaker.empty()) {
+        *out_speaker = best_entry.speaker;
+    }
+    return best_entry.text;
+}
+
 bool render_template(RenderCache& cache, const Settings& settings, int width, int height) {
     if (width <= 0 || height <= 0 || width > 16384 || height > 16384) {
         return false;
@@ -1950,10 +2286,29 @@ void sync_template_to_timeline_media(EDIT_SECTION* edit, bool quiet) {
         return;
     }
 
+    OBJECT_HANDLE target_template_obj = template_object;
+    int scan_frame = template_range.end + 1;
+    while (true) {
+        OBJECT_HANDLE next_obj = edit->find_object(template_range.layer, scan_frame);
+        if (!next_obj) {
+            break;
+        }
+        OBJECT_LAYER_FRAME next_range = edit->get_object_layer_frame(next_obj);
+        LPCWSTR next_name = edit->get_object_name ? edit->get_object_name(next_obj) : nullptr;
+        if (!next_name || *next_name == L'\0' || std::wcsstr(next_name, L"biim") != nullptr) {
+            target_template_obj = next_obj;
+        }
+        if (next_range.end < scan_frame) {
+            scan_frame++;
+        } else {
+            scan_frame = next_range.end + 1;
+        }
+    }
+
     if (edit->get_object_section_num && edit->move_object_section) {
         edit->move_object_section(
-            template_object,
-            edit->get_object_section_num(template_object),
+            target_template_obj,
+            edit->get_object_section_num(target_template_obj),
             max_end);
     }
 }
@@ -2011,7 +2366,49 @@ bool process_video(FILTER_PROC_VIDEO* video) {
 
     const int width = video->scene->width;
     const int height = video->scene->height;
-    const Settings settings = read_settings();
+    Settings settings = read_settings();
+
+    const int current_frame = video->object ? video->object->frame : 0;
+    const double current_time = video->object ? video->object->time : 0.0;
+    const double fps = (video->scene && video->scene->rate > 0 && video->scene->scale > 0)
+        ? static_cast<double>(video->scene->rate) / static_cast<double>(video->scene->scale)
+        : 30.0;
+
+    int current_section = 0;
+    int section_count = 1;
+    if (video->edit && video->object && video->edit->find_object &&
+        video->edit->get_object_section_num && video->edit->get_object_section_frame) {
+        OBJECT_HANDLE obj = video->edit->find_object(video->object->layer, video->object->frame_s);
+        if (obj) {
+            section_count = video->edit->get_object_section_num(obj);
+            if (section_count > 1) {
+                for (int s = 1; s < section_count; ++s) {
+                    int s_frame = video->edit->get_object_section_frame(obj, s);
+                    if (s_frame >= video->object->frame_s) {
+                        s_frame -= video->object->frame_s;
+                    }
+                    if (s_frame >= 0 && current_frame >= s_frame) {
+                        current_section = s;
+                    }
+                }
+            }
+        }
+    }
+
+    std::wstring speaker_from_caption;
+    settings.caption = resolve_timed_text(
+        settings.caption, current_frame, current_time, current_section, section_count, &speaker_from_caption, fps);
+    if (!speaker_from_caption.empty()) {
+        settings.speaker = speaker_from_caption;
+    } else {
+        settings.speaker = resolve_timed_text(
+            settings.speaker, current_frame, current_time, current_section, section_count, nullptr, fps);
+    }
+    settings.title = resolve_timed_text(
+        settings.title, current_frame, current_time, current_section, section_count, nullptr, fps);
+    settings.side_text = resolve_timed_text(
+        settings.side_text, current_frame, current_time, current_section, section_count, nullptr, fps);
+
     auto* cache = static_cast<RenderCache*>(video->userdata);
 
     std::scoped_lock lock(cache->mutex);
