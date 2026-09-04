@@ -120,6 +120,19 @@ bool mock_move_object(OBJECT_HANDLE object, int layer, int frame) {
     return true;
 }
 
+int mock_moved_section_frame = -1;
+int mock_get_object_section_num(OBJECT_HANDLE) {
+    return 1;
+}
+
+bool mock_move_object_section(OBJECT_HANDLE object, int, int frame) {
+    mock_moved_section_frame = frame;
+    if (object == reinterpret_cast<OBJECT_HANDLE>(100)) {
+        focused_range.end = frame;
+    }
+    return true;
+}
+
 bool mock_media_info(LPCWSTR, MEDIA_INFO* info, int) {
     info->video_track_num = media_video_tracks;
     info->audio_track_num = 1;
@@ -271,7 +284,11 @@ int wmain(int argc, wchar_t** argv) {
     }
 
     auto* place_button = static_cast<FILTER_ITEM_BUTTON*>(find_filter_item(
-        table, L"\u7d20\u6750\u3092\u8ffd\u52a0", L"button"));
+        table, L"\u7d20\u6750\u306e\u8ffd\u52a0\u30fb\u7de8\u96c6", L"button"));
+    if (!place_button) {
+        place_button = static_cast<FILTER_ITEM_BUTTON*>(find_filter_item(
+            table, L"\u7d20\u6750\u3092\u8ffd\u52a0", L"button"));
+    }
     auto* transparent_check = static_cast<FILTER_ITEM_CHECK*>(find_filter_item(
         table, L"\u53f3\u4e0b\u6b04\u3092\u900f\u904e", L"check"));
     auto* old_game_file = find_filter_item(
@@ -379,6 +396,134 @@ int wmain(int argc, wchar_t** argv) {
         SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_GAME_FILE", nullptr);
         SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_BOTTOM_RIGHT_FILE", nullptr);
         SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_MEDIA_LENGTH", nullptr);
+    }
+
+    if (result == 0) {
+        // Auto-adjustment test 1: game 40F, bottom-right none -> adjust to 40F (10..49)
+        focused_range = {2, 10, 109};
+        mock_moved_section_frame = -1;
+        created_media.clear();
+        item_changes.clear();
+        object_names.clear();
+        layer_names.clear();
+
+        EDIT_INFO adjust_info{};
+        adjust_info.width = 1280;
+        adjust_info.height = 720;
+        adjust_info.frame = 10;
+        adjust_info.layer = 2;
+        adjust_info.layer_max = 2;
+        EDIT_SECTION adjust_edit{};
+        adjust_edit.info = &adjust_info;
+        adjust_edit.find_object = mock_find_object;
+        adjust_edit.get_focus_object = mock_focus_object;
+        adjust_edit.get_object_layer_frame = mock_object_range;
+        adjust_edit.get_media_info = mock_media_info;
+        adjust_edit.create_object_from_media_file = mock_create_media;
+        adjust_edit.set_object_item_value = mock_set_item;
+        adjust_edit.get_effect_list = mock_effect_list;
+        adjust_edit.get_effect_item_value = mock_get_effect_item;
+        adjust_edit.set_effect_item_value = mock_set_effect_item;
+        adjust_edit.set_object_name = mock_set_object_name;
+        adjust_edit.set_layer_name = mock_set_layer_name;
+        adjust_edit.get_layer_lock = mock_layer_lock;
+        adjust_edit.move_object = mock_move_object;
+        adjust_edit.get_object_section_num = mock_get_object_section_num;
+        adjust_edit.move_object_section = mock_move_object_section;
+
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_HEADLESS_TEST", L"1");
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_GAME_FILE", L"C:\\media\\game.mp4");
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_BOTTOM_RIGHT_FILE", L"");
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_GAME_LENGTH", L"40");
+        place_button->callback(&adjust_edit);
+
+        if (mock_moved_section_frame != 49 || focused_range.end != 49) {
+            result = fail("the template was not shortened to match the gameplay media length");
+        }
+
+        // Auto-adjustment test 2: game 30F, bottom-right 75F -> adjust to longer 75F (10..84)
+        if (result == 0) {
+            focused_range = {2, 10, 109};
+            mock_moved_section_frame = -1;
+            created_media.clear();
+            item_changes.clear();
+            object_names.clear();
+            layer_names.clear();
+
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_GAME_FILE", L"C:\\media\\game.mp4");
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_BOTTOM_RIGHT_FILE", L"C:\\media\\speaker.png");
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_GAME_LENGTH", L"30");
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_BOTTOM_RIGHT_LENGTH", L"75");
+            place_button->callback(&adjust_edit);
+
+            if (mock_moved_section_frame != 84 || focused_range.end != 84) {
+                result = fail("the template was not adjusted to the longer bottom-right media length");
+            }
+        }
+
+        // Editing test 1: Add game media 40F, edit its length to 90F -> adjusts template to 10..99
+        if (result == 0) {
+            focused_range = {2, 10, 109};
+            mock_moved_section_frame = -1;
+            created_media.clear();
+            item_changes.clear();
+            object_names.clear();
+            layer_names.clear();
+
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_GAME_FILE", L"C:\\media\\game.mp4");
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_BOTTOM_RIGHT_FILE", L"");
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_GAME_LENGTH", L"40");
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_BOTTOM_RIGHT_LENGTH", L"");
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_EDIT_INDEX", L"0");
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_EDIT_NEW_LENGTH", L"90");
+            place_button->callback(&adjust_edit);
+
+            if (mock_moved_section_frame != 99 || focused_range.end != 99) {
+                result = fail("editing media length did not adjust the template length");
+            }
+
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_EDIT_INDEX", nullptr);
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_EDIT_NEW_LENGTH", nullptr);
+        }
+
+        // Editing test 2: Move destination of item 0 (game -> bottom-right)
+        if (result == 0) {
+            focused_range = {2, 10, 109};
+            mock_moved_section_frame = -1;
+            created_media.clear();
+            object_names.clear();
+
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_GAME_FILE", L"C:\\media\\game.mp4");
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_BOTTOM_RIGHT_FILE", L"");
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_GAME_LENGTH", L"50");
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_EDIT_INDEX", L"0");
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_EDIT_MOVE_DEST", L"1");
+            place_button->callback(&adjust_edit);
+
+            if (created_media.empty() || object_names.empty()) {
+                result = fail("moving media destination did not recreate object");
+            } else {
+                bool found_br = false;
+                for (const auto& name : object_names) {
+                    if (name == L"biim: \u53f3\u4e0b\u7d20\u6750") {
+                        found_br = true;
+                        break;
+                    }
+                }
+                if (!found_br) {
+                    result = fail("moved media object was not configured as bottom-right media");
+                }
+            }
+
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_EDIT_INDEX", nullptr);
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_EDIT_MOVE_DEST", nullptr);
+        }
+
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_HEADLESS_TEST", nullptr);
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_GAME_FILE", nullptr);
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_BOTTOM_RIGHT_FILE", nullptr);
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_GAME_LENGTH", nullptr);
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_BOTTOM_RIGHT_LENGTH", nullptr);
     }
 
     table->func_destroy(1, userdata);

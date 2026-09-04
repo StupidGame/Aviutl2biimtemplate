@@ -39,7 +39,7 @@ constexpr wchar_t media_file_filter[] =
     L"*.mp4;*.mkv;*.avi;*.mov;*.webm;*.png;*.jpg;*.jpeg;*.bmp;*.webp\0"
     L"All Files (*.*)\0*.*\0";
 auto place_media_button = FILTER_ITEM_BUTTON(
-    L"\u7d20\u6750\u3092\u8ffd\u52a0", open_media_manager);
+    L"\u7d20\u6750\u306e\u8ffd\u52a0\u30fb\u7de8\u96c6", open_media_manager);
 auto bottom_right_transparent = FILTER_ITEM_CHECK(L"\u53f3\u4e0b\u6b04\u3092\u900f\u904e", false);
 
 auto background_group = FILTER_ITEM_GROUP(L"\u80cc\u666f");
@@ -889,9 +889,14 @@ constexpr int dest_game_radio_id = 2110;
 constexpr int dest_bottom_right_radio_id = 2111;
 constexpr int order_list_id = 2101;
 constexpr int order_add_id = 2107;
+constexpr int order_change_file_id = 2108;
+constexpr int order_move_dest_id = 2109;
 constexpr int order_up_id = 2102;
 constexpr int order_down_id = 2103;
 constexpr int order_remove_id = 2104;
+constexpr int order_length_edit_id = 2112;
+constexpr int order_change_length_id = 2113;
+constexpr int order_total_label_id = 2114;
 constexpr int order_accept_id = 2105;
 constexpr int order_cancel_id = 2106;
 
@@ -978,6 +983,38 @@ void refresh_order_list(HWND window, UnifiedOrderDialogState* state, int selecti
     if (!items.empty()) {
         selection = std::clamp(selection, 0, static_cast<int>(items.size()) - 1);
         SendMessageW(list, LB_SETCURSEL, selection, 0);
+        SetDlgItemInt(
+            window,
+            order_length_edit_id,
+            static_cast<UINT>(items[static_cast<std::size_t>(selection)].length),
+            FALSE);
+    } else {
+        SetDlgItemTextW(window, order_length_edit_id, L"");
+    }
+
+    int64_t total_length = 0;
+    for (const auto& item : items) {
+        total_length += item.length;
+    }
+    const std::wstring total_str = L"\u5408\u8a08: " + std::to_wstring(total_length) + L"F";
+    SetDlgItemTextW(window, order_total_label_id, total_str.c_str());
+}
+
+void apply_length_edit(HWND window, UnifiedOrderDialogState* state) {
+    if (!window || !state) {
+        return;
+    }
+    auto& items = get_current_items(state);
+    const HWND list = GetDlgItem(window, order_list_id);
+    const int selected = static_cast<int>(SendMessageW(list, LB_GETCURSEL, 0, 0));
+    if (selected >= 0 && selected < static_cast<int>(items.size())) {
+        BOOL success = FALSE;
+        const UINT val = GetDlgItemInt(window, order_length_edit_id, &success, FALSE);
+        if (success && val > 0 && static_cast<int>(val) != items[static_cast<std::size_t>(selected)].length) {
+            items[static_cast<std::size_t>(selected)].length = static_cast<int>(val);
+            mark_modified(state);
+            refresh_order_list(window, state, selected);
+        }
     }
 }
 
@@ -1025,39 +1062,76 @@ LRESULT CALLBACK unified_order_dialog_proc(HWND window, UINT message, WPARAM wpa
             set_control_font(CreateWindowExW(
                 WS_EX_CLIENTEDGE, L"LISTBOX", L"",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY,
-                12, 42, 430, 310, window,
+                12, 42, 430, 290, window,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(order_list_id)), GetModuleHandleW(nullptr), nullptr));
 
             set_control_font(CreateWindowExW(
                 0, L"BUTTON", L"\u7d20\u6750\u3092\u8ffd\u52a0",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                454, 42, 105, 32, window,
+                454, 42, 110, 30, window,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(order_add_id)), GetModuleHandleW(nullptr), nullptr));
+            set_control_font(CreateWindowExW(
+                0, L"BUTTON", L"\u30d5\u30a1\u30a4\u30eb\u3092\u5909\u66f4",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                454, 78, 110, 30, window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(order_change_file_id)), GetModuleHandleW(nullptr), nullptr));
+            set_control_font(CreateWindowExW(
+                0, L"BUTTON", L"\u914d\u7f6e\u5148\u3092\u5909\u66f4",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                454, 114, 110, 30, window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(order_move_dest_id)), GetModuleHandleW(nullptr), nullptr));
             set_control_font(CreateWindowExW(
                 0, L"BUTTON", L"\u4e0a\u3078",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                454, 84, 105, 32, window,
+                454, 150, 110, 30, window,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(order_up_id)), GetModuleHandleW(nullptr), nullptr));
             set_control_font(CreateWindowExW(
                 0, L"BUTTON", L"\u4e0b\u3078",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                454, 124, 105, 32, window,
+                454, 186, 110, 30, window,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(order_down_id)), GetModuleHandleW(nullptr), nullptr));
             set_control_font(CreateWindowExW(
                 0, L"BUTTON", L"\u4e00\u89a7\u304b\u3089\u5916\u3059",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                454, 166, 105, 32, window,
+                454, 222, 110, 30, window,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(order_remove_id)), GetModuleHandleW(nullptr), nullptr));
+
+            set_control_font(CreateWindowExW(
+                0, L"STATIC", L"\u9078\u629e\u7d20\u6750\u306e\u9577\u3055:",
+                WS_CHILD | WS_VISIBLE,
+                14, 345, 110, 20, window,
+                nullptr, GetModuleHandleW(nullptr), nullptr));
+            set_control_font(CreateWindowExW(
+                WS_EX_CLIENTEDGE, L"EDIT", L"",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL,
+                128, 342, 65, 24, window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(order_length_edit_id)), GetModuleHandleW(nullptr), nullptr));
+            set_control_font(CreateWindowExW(
+                0, L"STATIC", L"\u30d5\u30ec\u30fc\u30e0",
+                WS_CHILD | WS_VISIBLE,
+                198, 345, 60, 20, window,
+                nullptr, GetModuleHandleW(nullptr), nullptr));
+            set_control_font(CreateWindowExW(
+                0, L"BUTTON", L"\u9577\u3055\u3092\u9069\u7528",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                264, 340, 95, 28, window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(order_change_length_id)), GetModuleHandleW(nullptr), nullptr));
+
+            set_control_font(CreateWindowExW(
+                0, L"STATIC", L"\u5408\u8a08: 0F",
+                WS_CHILD | WS_VISIBLE,
+                14, 395, 250, 20, window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(order_total_label_id)), GetModuleHandleW(nullptr), nullptr));
 
             set_control_font(CreateWindowExW(
                 0, L"BUTTON", L"\u914d\u7f6e",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-                342, 362, 105, 34, window,
+                342, 388, 105, 34, window,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(order_accept_id)), GetModuleHandleW(nullptr), nullptr));
             set_control_font(CreateWindowExW(
                 0, L"BUTTON", L"\u30ad\u30e3\u30f3\u30bb\u30eb",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                454, 362, 105, 34, window,
+                454, 388, 110, 34, window,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(order_cancel_id)), GetModuleHandleW(nullptr), nullptr));
 
             refresh_order_list(window, state, 0);
@@ -1087,6 +1161,22 @@ LRESULT CALLBACK unified_order_dialog_proc(HWND window, UINT message, WPARAM wpa
             const HWND list = GetDlgItem(window, order_list_id);
             const int selected = static_cast<int>(SendMessageW(list, LB_GETCURSEL, 0, 0));
 
+            if (command == order_list_id && HIWORD(wparam) == LBN_SELCHANGE) {
+                if (selected >= 0 && selected < static_cast<int>(items.size())) {
+                    SetDlgItemInt(
+                        window,
+                        order_length_edit_id,
+                        static_cast<UINT>(items[static_cast<std::size_t>(selected)].length),
+                        FALSE);
+                }
+                return 0;
+            }
+
+            if (command == order_change_length_id) {
+                apply_length_edit(window, state);
+                return 0;
+            }
+
             if (command == order_add_id) {
                 std::vector<std::wstring> added_files = open_media_file_dialog();
                 if (!added_files.empty()) {
@@ -1115,6 +1205,45 @@ LRESULT CALLBACK unified_order_dialog_proc(HWND window, UINT message, WPARAM wpa
                 }
                 return 0;
             }
+            if (command == order_change_file_id && selected >= 0 && selected < static_cast<int>(items.size())) {
+                std::vector<std::wstring> chosen = open_media_file_dialog();
+                if (!chosen.empty()) {
+                    auto& item = items[static_cast<std::size_t>(selected)];
+                    item.path = chosen.front();
+                    if (item.handle && state->edit && state->edit->delete_object) {
+                        state->edit->delete_object(item.handle);
+                    }
+                    item.handle = nullptr;
+                    if (state->edit && state->edit->info) {
+                        MEDIA_INFO media{};
+                        if (state->edit->get_media_info &&
+                            state->edit->get_media_info(item.path.c_str(), &media, sizeof(media)) &&
+                            media.width > 0 && media.height > 0) {
+                            item.length = media_sequence_length(*state->edit->info, media);
+                        }
+                    }
+                    mark_modified(state);
+                    refresh_order_list(window, state, selected);
+                }
+                return 0;
+            }
+            if (command == order_move_dest_id && selected >= 0 && selected < static_cast<int>(items.size())) {
+                MediaOrderItem item = std::move(items[static_cast<std::size_t>(selected)]);
+                items.erase(items.begin() + selected);
+                if (item.handle && state->edit && state->edit->delete_object) {
+                    state->edit->delete_object(item.handle);
+                }
+                item.handle = nullptr;
+                if (state->current_destination == MediaDestination::game) {
+                    state->bottom_right_items.push_back(std::move(item));
+                } else {
+                    state->game_items.push_back(std::move(item));
+                }
+                state->game_modified = true;
+                state->bottom_right_modified = true;
+                refresh_order_list(window, state, selected);
+                return 0;
+            }
             if (command == order_up_id && selected > 0) {
                 std::swap(items[static_cast<std::size_t>(selected)],
                           items[static_cast<std::size_t>(selected - 1)]);
@@ -1138,6 +1267,7 @@ LRESULT CALLBACK unified_order_dialog_proc(HWND window, UINT message, WPARAM wpa
                 return 0;
             }
             if (command == order_accept_id) {
+                apply_length_edit(window, state);
                 state->accepted = true;
                 DestroyWindow(window);
                 return 0;
@@ -1284,16 +1414,7 @@ bool apply_media_sequence_items(
         return false;
     }
 
-    const int desired_end = template_range.start + static_cast<int>(total_length) - 1;
-    if (desired_end > template_range.end) {
-        if (edit->get_object_section_num && edit->move_object_section) {
-            edit->move_object_section(
-                template_object,
-                edit->get_object_section_num(template_object),
-                desired_end);
-            template_range.end = desired_end;
-        }
-    }
+
 
     MediaTarget game_target{};
     MediaTarget bottom_right_target{};
@@ -1361,6 +1482,10 @@ bool apply_media_sequence_items(
             if (item.handle) {
                 if (edit->move_object(item.handle, target_layer, frame)) {
                     ++placed;
+                }
+                if (edit->get_object_section_num && edit->move_object_section) {
+                    const int section = edit->get_object_section_num(item.handle);
+                    edit->move_object_section(item.handle, section, frame + item.length - 1);
                 }
             } else if (!item.path.empty()) {
                 if (create_media_object(
@@ -1451,13 +1576,25 @@ void open_media_manager(EDIT_SECTION* edit) {
             override_length = _wtoi(length_str);
         }
 
+        wchar_t game_len_str[32]{};
+        int game_override = override_length;
+        if (GetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_GAME_LENGTH", game_len_str, 32) > 0) {
+            game_override = _wtoi(game_len_str);
+        }
+
+        wchar_t br_len_str[32]{};
+        int br_override = override_length;
+        if (GetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_BOTTOM_RIGHT_LENGTH", br_len_str, 32) > 0) {
+            br_override = _wtoi(br_len_str);
+        }
+
         wchar_t game_file[MAX_PATH]{};
         if (GetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_GAME_FILE", game_file, MAX_PATH) > 0 && *game_file) {
             MediaOrderItem item{};
             item.path = game_file;
             MEDIA_INFO media{};
-            if (override_length > 0) {
-                item.length = override_length;
+            if (game_override > 0) {
+                item.length = game_override;
             } else if (edit->get_media_info && edit->get_media_info(game_file, &media, sizeof(media)) && media.width > 0) {
                 item.length = media_sequence_length(*edit->info, media);
             } else {
@@ -1472,8 +1609,8 @@ void open_media_manager(EDIT_SECTION* edit) {
             MediaOrderItem item{};
             item.path = br_file;
             MEDIA_INFO media{};
-            if (override_length > 0) {
-                item.length = override_length;
+            if (br_override > 0) {
+                item.length = br_override;
             } else if (edit->get_media_info && edit->get_media_info(br_file, &media, sizeof(media)) && media.width > 0) {
                 item.length = media_sequence_length(*edit->info, media);
             } else {
@@ -1482,6 +1619,63 @@ void open_media_manager(EDIT_SECTION* edit) {
             state.bottom_right_items.push_back(item);
             state.bottom_right_modified = true;
         }
+
+        wchar_t clear_game[16]{};
+        if (GetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_CLEAR_GAME", clear_game, 16) > 0) {
+            state.game_items.clear();
+            state.game_modified = true;
+        }
+        wchar_t clear_br[16]{};
+        if (GetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_CLEAR_BOTTOM_RIGHT", clear_br, 16) > 0) {
+            state.bottom_right_items.clear();
+            state.bottom_right_modified = true;
+        }
+
+        wchar_t test_dest[16]{};
+        if (GetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_DEST", test_dest, 16) > 0 && _wtoi(test_dest) == 1) {
+            state.current_destination = MediaDestination::bottom_right;
+        }
+
+        wchar_t edit_idx_str[16]{};
+        if (GetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_EDIT_INDEX", edit_idx_str, 16) > 0) {
+            const int edit_idx = _wtoi(edit_idx_str);
+            auto& items = (state.current_destination == MediaDestination::game)
+                ? state.game_items
+                : state.bottom_right_items;
+            if (edit_idx >= 0 && edit_idx < static_cast<int>(items.size())) {
+                wchar_t new_len_str[32]{};
+                if (GetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_EDIT_NEW_LENGTH", new_len_str, 32) > 0) {
+                    items[static_cast<std::size_t>(edit_idx)].length = _wtoi(new_len_str);
+                    mark_modified(&state);
+                }
+                wchar_t new_file[MAX_PATH]{};
+                if (GetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_EDIT_NEW_FILE", new_file, MAX_PATH) > 0 && *new_file) {
+                    items[static_cast<std::size_t>(edit_idx)].path = new_file;
+                    if (items[static_cast<std::size_t>(edit_idx)].handle && edit->delete_object) {
+                        edit->delete_object(items[static_cast<std::size_t>(edit_idx)].handle);
+                    }
+                    items[static_cast<std::size_t>(edit_idx)].handle = nullptr;
+                    mark_modified(&state);
+                }
+                wchar_t move_dest[16]{};
+                if (GetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_EDIT_MOVE_DEST", move_dest, 16) > 0) {
+                    MediaOrderItem item = std::move(items[static_cast<std::size_t>(edit_idx)]);
+                    items.erase(items.begin() + edit_idx);
+                    if (item.handle && edit->delete_object) {
+                        edit->delete_object(item.handle);
+                    }
+                    item.handle = nullptr;
+                    if (state.current_destination == MediaDestination::game) {
+                        state.bottom_right_items.push_back(std::move(item));
+                    } else {
+                        state.game_items.push_back(std::move(item));
+                    }
+                    state.game_modified = true;
+                    state.bottom_right_modified = true;
+                }
+            }
+        }
+
         state.accepted = true;
     } else {
         constexpr wchar_t class_name[] = L"BiimTemplateUnifiedMediaWindow";
@@ -1496,7 +1690,7 @@ void open_media_manager(EDIT_SECTION* edit) {
         }
 
         const HWND owner = GetActiveWindow();
-        RECT rectangle{0, 0, 575, 410};
+        RECT rectangle{0, 0, 580, 440};
         AdjustWindowRectEx(&rectangle, WS_CAPTION | WS_SYSMENU | WS_POPUP, FALSE, WS_EX_DLGMODALFRAME);
         int x = CW_USEDEFAULT;
         int y = CW_USEDEFAULT;
@@ -1511,7 +1705,7 @@ void open_media_manager(EDIT_SECTION* edit) {
         const HWND window = CreateWindowExW(
             WS_EX_DLGMODALFRAME,
             class_name,
-            L"\u7d20\u6750\u306e\u8ffd\u52a0\u3068\u914d\u7f6e",
+            L"\u7d20\u6750\u306e\u8ffd\u52a0\u30fb\u7de8\u96c6",
             WS_CAPTION | WS_SYSMENU | WS_POPUP,
             x,
             y,
@@ -1596,6 +1790,29 @@ void open_media_manager(EDIT_SECTION* edit) {
                     if (item.handle) {
                         edit->delete_object(item.handle);
                     }
+                }
+            }
+        }
+
+        if (state.game_modified || state.bottom_right_modified) {
+            int64_t game_length = 0;
+            for (const auto& item : state.game_items) {
+                game_length += item.length;
+            }
+            int64_t bottom_right_length = 0;
+            for (const auto& item : state.bottom_right_items) {
+                bottom_right_length += item.length;
+            }
+
+            const int64_t max_length = std::max(game_length, bottom_right_length);
+            if (max_length > 0 && edit->get_object_section_num && edit->move_object_section && edit->get_object_layer_frame) {
+                const OBJECT_LAYER_FRAME current_range = edit->get_object_layer_frame(template_object);
+                const int desired_end = current_range.start + static_cast<int>(max_length) - 1;
+                if (desired_end != current_range.end && desired_end >= current_range.start) {
+                    edit->move_object_section(
+                        template_object,
+                        edit->get_object_section_num(template_object),
+                        desired_end);
                 }
             }
         }
