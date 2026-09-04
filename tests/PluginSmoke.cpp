@@ -66,6 +66,11 @@ bool has_alpha_at(int x, int y, bool expected_visible) {
     return expected_visible ? pixel.a > 0 : pixel.a == 0;
 }
 
+bool pixels_equal(const std::vector<PIXEL_RGBA>& a, const std::vector<PIXEL_RGBA>& b) {
+    return a.size() == b.size() &&
+           std::memcmp(a.data(), b.data(), a.size() * sizeof(PIXEL_RGBA)) == 0;
+}
+
 bool has_title_text_pixels() {
     for (int y = 0; y < 100; ++y) {
         for (int x = 970; x < 1270; ++x) {
@@ -99,15 +104,87 @@ void* find_filter_item(FILTER_PLUGIN_TABLE* table, LPCWSTR name, LPCWSTR type) {
     return nullptr;
 }
 
-OBJECT_HANDLE mock_focus_object() {
-    return reinterpret_cast<OBJECT_HANDLE>(100);
+struct MockTimelineObject {
+    OBJECT_HANDLE handle = nullptr;
+    int layer = 0;
+    int start = 0;
+    int end = 0;
+    std::wstring name;
+    std::string alias;
+};
+std::vector<MockTimelineObject> mock_timeline_objects;
+OBJECT_HANDLE mock_focused_obj = reinterpret_cast<OBJECT_HANDLE>(100);
+int mock_cursor_layer = -1;
+int mock_cursor_frame = -1;
+int mock_display_layer = -1;
+int mock_display_frame = -1;
+
+void mock_set_focus_object(OBJECT_HANDLE obj) {
+    mock_focused_obj = obj;
 }
 
-OBJECT_LAYER_FRAME mock_object_range(OBJECT_HANDLE) {
+void mock_set_cursor_layer_frame(int layer, int frame) {
+    mock_cursor_layer = layer;
+    mock_cursor_frame = frame;
+}
+
+void mock_set_display_layer_frame(int layer, int frame) {
+    mock_display_layer = layer;
+    mock_display_frame = frame;
+}
+
+OBJECT_HANDLE mock_focus_object() {
+    return mock_focused_obj;
+}
+
+OBJECT_LAYER_FRAME mock_object_range(OBJECT_HANDLE object) {
+    if (object == reinterpret_cast<OBJECT_HANDLE>(100)) {
+        return focused_range;
+    }
+    for (const auto& item : mock_timeline_objects) {
+        if (item.handle == object) {
+            return {item.layer, item.start, item.end};
+        }
+    }
     return focused_range;
 }
 
-OBJECT_HANDLE mock_find_object(int, int) {
+OBJECT_HANDLE mock_find_object(int layer, int frame) {
+    OBJECT_HANDLE best = nullptr;
+    int best_start = 10000000;
+    for (const auto& item : mock_timeline_objects) {
+        if (item.layer == layer && item.end >= frame && item.start < best_start) {
+            best_start = item.start;
+            best = item.handle;
+        }
+    }
+    return best;
+}
+
+LPCWSTR mock_get_object_name(OBJECT_HANDLE object) {
+    for (const auto& item : mock_timeline_objects) {
+        if (item.handle == object) {
+            return item.name.c_str();
+        }
+    }
+    return nullptr;
+}
+
+LPCWSTR mock_get_layer_name(int layer) {
+    for (const auto& item : mock_timeline_objects) {
+        if (item.layer == layer) {
+            return item.name.c_str();
+        }
+    }
+    return nullptr;
+}
+
+LPCSTR mock_get_object_alias(OBJECT_HANDLE object) {
+    for (const auto& item : mock_timeline_objects) {
+        if (item.handle == object) {
+            return item.alias.c_str();
+        }
+    }
     return nullptr;
 }
 
@@ -117,6 +194,34 @@ bool mock_layer_lock(int) {
 
 bool mock_move_object(OBJECT_HANDLE object, int layer, int frame) {
     object_moves.push_back({object, layer, frame});
+    return true;
+}
+
+int mock_moved_section_frame = -1;
+int mock_custom_section_count = 1;
+std::vector<int> mock_section_frames;
+
+int mock_get_object_section_num(OBJECT_HANDLE) {
+    return mock_custom_section_count;
+}
+
+int mock_get_object_section_frame(OBJECT_HANDLE, int section) {
+    if (section >= 0 && section < static_cast<int>(mock_section_frames.size())) {
+        return mock_section_frames[static_cast<std::size_t>(section)];
+    }
+    return 0;
+}
+
+bool mock_move_object_section(OBJECT_HANDLE object, int, int frame) {
+    mock_moved_section_frame = frame;
+    if (object == reinterpret_cast<OBJECT_HANDLE>(100)) {
+        focused_range.end = frame;
+    }
+    for (auto& item : mock_timeline_objects) {
+        if (item.handle == object) {
+            item.end = frame;
+        }
+    }
     return true;
 }
 
@@ -132,6 +237,7 @@ bool mock_media_info(LPCWSTR, MEDIA_INFO* info, int) {
 OBJECT_HANDLE mock_create_media(LPCWSTR path, int layer, int frame, int length) {
     const auto handle = reinterpret_cast<OBJECT_HANDLE>(created_media.size() + 1);
     created_media.push_back({path, layer, frame, length, handle});
+    mock_timeline_objects.push_back({handle, layer, frame, frame + length - 1, L"", ""});
     return handle;
 }
 
@@ -162,12 +268,22 @@ bool mock_set_effect_item(EFFECT_HANDLE effect, LPCWSTR item, LPCSTR value) {
     return true;
 }
 
-void mock_set_object_name(OBJECT_HANDLE, LPCWSTR name) {
+void mock_set_object_name(OBJECT_HANDLE object, LPCWSTR name) {
     object_names.emplace_back(name);
+    for (auto& item : mock_timeline_objects) {
+        if (item.handle == object) {
+            item.name = name;
+        }
+    }
 }
 
-void mock_set_layer_name(int, LPCWSTR name) {
+void mock_set_layer_name(int layer, LPCWSTR name) {
     layer_names.emplace_back(name);
+    for (auto& item : mock_timeline_objects) {
+        if (item.layer == layer && item.name.empty()) {
+            item.name = name;
+        }
+    }
 }
 
 double changed_value(OBJECT_HANDLE object, LPCWSTR item) {
@@ -270,29 +386,33 @@ int wmain(int argc, wchar_t** argv) {
         result = fail("the cached second frame differs from the first frame");
     }
 
-    auto* game_file = static_cast<FILTER_ITEM_FILE*>(find_filter_item(
-        table, L"\u30b2\u30fc\u30e0\u6b04\u306e\u52d5\u753b\u30fb\u753b\u50cf", L"file"));
-    auto* bottom_right_file = static_cast<FILTER_ITEM_FILE*>(find_filter_item(
-        table, L"\u53f3\u4e0b\u306e\u52d5\u753b\u30fb\u753b\u50cf", L"file"));
     auto* place_button = static_cast<FILTER_ITEM_BUTTON*>(find_filter_item(
-        table, L"\u9078\u3093\u3060\u7d20\u6750\u3092\u914d\u7f6e", L"button"));
-    auto* game_sequence_button = static_cast<FILTER_ITEM_BUTTON*>(find_filter_item(
-        table, L"\u30b2\u30fc\u30e0\u6b04\u3078\u8907\u6570\u7d20\u6750\u3092\u8ffd\u52a0", L"button"));
-    auto* edit_game_sequence_button = static_cast<FILTER_ITEM_BUTTON*>(find_filter_item(
-        table, L"\u30b2\u30fc\u30e0\u7d20\u6750\u306e\u9806\u756a\u3092\u64cd\u4f5c", L"button"));
-    auto* place_bottom_right_sequence_button = static_cast<FILTER_ITEM_BUTTON*>(find_filter_item(
-        table, L"\u53f3\u4e0b\u6b04\u3078\u8907\u6570\u7d20\u6750\u3092\u8ffd\u52a0", L"button"));
-    auto* edit_bottom_right_sequence_button = static_cast<FILTER_ITEM_BUTTON*>(find_filter_item(
-        table, L"\u53f3\u4e0b\u7d20\u6750\u306e\u9806\u756a\u3092\u64cd\u4f5c", L"button"));
-    if (result == 0 && (!game_file || !bottom_right_file || !place_button ||
-                        !game_sequence_button || !edit_game_sequence_button ||
-                        !place_bottom_right_sequence_button || !edit_bottom_right_sequence_button)) {
-        result = fail("the media controls are missing");
+        table, L"\u7d20\u6750\u306e\u8ffd\u52a0\u30fb\u7de8\u96c6", L"button"));
+    if (!place_button) {
+        place_button = static_cast<FILTER_ITEM_BUTTON*>(find_filter_item(
+            table, L"\u7d20\u6750\u3092\u8ffd\u52a0", L"button"));
+    }
+    auto* sync_to_media_button = static_cast<FILTER_ITEM_BUTTON*>(find_filter_item(
+        table, L"\u9577\u3055\u3092\u7d20\u6750\u306b\u5408\u308f\u305b\u308b", L"button"));
+    auto* sync_to_template_button = static_cast<FILTER_ITEM_BUTTON*>(find_filter_item(
+        table, L"\u7d20\u6750\u3092\u67a0\u306e\u9577\u3055\u306b\u5408\u308f\u305b\u308b", L"button"));
+    auto* transparent_check = static_cast<FILTER_ITEM_CHECK*>(find_filter_item(
+        table, L"\u53f3\u4e0b\u6b04\u3092\u900f\u904e", L"check"));
+    auto* old_game_file = find_filter_item(
+        table, L"\u30b2\u30fc\u30e0\u6b04\u306e\u52d5\u753b\u30fb\u753b\u50cf", L"file");
+    auto* old_place_button = find_filter_item(
+        table, L"\u9078\u3093\u3060\u7d20\u6750\u3092\u914d\u7f6e", L"button");
+    if (result == 0 && (!place_button || !sync_to_media_button || !sync_to_template_button ||
+                        !transparent_check || old_game_file || old_place_button)) {
+        result = fail("the unified media controls or timeline sync buttons are missing or old controls still exist");
     }
 
     if (result == 0) {
-        game_file->value = L"C:\\media\\game.mp4";
-        bottom_right_file->value = L"C:\\media\\speaker.png";
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_HEADLESS_TEST", L"1");
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_GAME_FILE", L"C:\\media\\game.mp4");
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_BOTTOM_RIGHT_FILE", L"C:\\media\\speaker.png");
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_MEDIA_LENGTH", L"100");
+
         EDIT_INFO edit_info{};
         edit_info.width = 1280;
         edit_info.height = 720;
@@ -316,7 +436,7 @@ int wmain(int argc, wchar_t** argv) {
         edit.move_object = mock_move_object;
         place_button->callback(&edit);
 
-        if (created_media.size() != 2 || item_changes.size() != 6 ||
+        if (created_media.size() != 2 || item_changes.size() != 7 ||
             object_names.size() != 2 || layer_names.size() != 2) {
             result = fail("the media placement callback did not create and configure two objects");
         } else if (created_media[0].layer != 3 || created_media[1].layer != 2 ||
@@ -340,14 +460,16 @@ int wmain(int argc, wchar_t** argv) {
 
     if (result == 0) {
         created_media.clear();
+        mock_timeline_objects.clear();
         item_changes.clear();
         object_names.clear();
         layer_names.clear();
         object_moves.clear();
         focused_range = {0, 20, 29};
         media_video_tracks = 0;
-        game_file->value = L"C:\\media\\still.png";
-        bottom_right_file->value = L"";
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_GAME_FILE", L"C:\\media\\still.png");
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_BOTTOM_RIGHT_FILE", L"");
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_MEDIA_LENGTH", L"10");
 
         EDIT_INFO top_edit_info{};
         top_edit_info.width = 1280;
@@ -378,6 +500,350 @@ int wmain(int argc, wchar_t** argv) {
         } else if (item_changes.size() != 3) {
             result = fail("the top-layer image was not fitted into the gameplay area");
         }
+
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_HEADLESS_TEST", nullptr);
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_GAME_FILE", nullptr);
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_BOTTOM_RIGHT_FILE", nullptr);
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_MEDIA_LENGTH", nullptr);
+    }
+
+    if (result == 0) {
+        // Auto-adjustment test 1: game 40F, bottom-right none -> adjust to 40F (10..49)
+        focused_range = {2, 10, 109};
+        mock_moved_section_frame = -1;
+        created_media.clear();
+        mock_timeline_objects.clear();
+        item_changes.clear();
+        object_names.clear();
+        layer_names.clear();
+
+        EDIT_INFO adjust_info{};
+        adjust_info.width = 1280;
+        adjust_info.height = 720;
+        adjust_info.frame = 10;
+        adjust_info.layer = 2;
+        adjust_info.layer_max = 2;
+        EDIT_SECTION adjust_edit{};
+        adjust_edit.info = &adjust_info;
+        adjust_edit.find_object = mock_find_object;
+        adjust_edit.get_focus_object = mock_focus_object;
+        adjust_edit.get_object_layer_frame = mock_object_range;
+        adjust_edit.get_media_info = mock_media_info;
+        adjust_edit.create_object_from_media_file = mock_create_media;
+        adjust_edit.set_object_item_value = mock_set_item;
+        adjust_edit.get_effect_list = mock_effect_list;
+        adjust_edit.get_effect_item_value = mock_get_effect_item;
+        adjust_edit.set_effect_item_value = mock_set_effect_item;
+        adjust_edit.set_object_name = mock_set_object_name;
+        adjust_edit.set_layer_name = mock_set_layer_name;
+        adjust_edit.get_object_name = mock_get_object_name;
+        adjust_edit.get_layer_name = mock_get_layer_name;
+        adjust_edit.get_object_alias = mock_get_object_alias;
+        adjust_edit.set_focus_object = mock_set_focus_object;
+        adjust_edit.set_cursor_layer_frame = mock_set_cursor_layer_frame;
+        adjust_edit.set_display_layer_frame = mock_set_display_layer_frame;
+        adjust_edit.get_layer_lock = mock_layer_lock;
+        adjust_edit.move_object = mock_move_object;
+        adjust_edit.get_object_section_num = mock_get_object_section_num;
+        adjust_edit.get_object_section_frame = mock_get_object_section_frame;
+        adjust_edit.move_object_section = mock_move_object_section;
+
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_HEADLESS_TEST", L"1");
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_GAME_FILE", L"C:\\media\\game.mp4");
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_BOTTOM_RIGHT_FILE", L"");
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_GAME_LENGTH", L"40");
+        place_button->callback(&adjust_edit);
+
+        if (mock_moved_section_frame != 49 || focused_range.end != 49) {
+            result = fail("the template was not shortened to match the gameplay media length");
+        }
+
+        // Auto-adjustment test 2: game 30F, bottom-right 75F -> adjust to longer 75F (10..84)
+        if (result == 0) {
+            focused_range = {2, 10, 109};
+            mock_moved_section_frame = -1;
+            created_media.clear();
+            mock_timeline_objects.clear();
+            item_changes.clear();
+            object_names.clear();
+            layer_names.clear();
+
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_GAME_FILE", L"C:\\media\\game.mp4");
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_BOTTOM_RIGHT_FILE", L"C:\\media\\speaker.png");
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_GAME_LENGTH", L"30");
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_BOTTOM_RIGHT_LENGTH", L"75");
+            place_button->callback(&adjust_edit);
+
+            if (mock_moved_section_frame != 84 || focused_range.end != 84) {
+                result = fail("the template was not adjusted to the longer bottom-right media length");
+            }
+        }
+
+        // Editing test 1: Add game media 40F, edit its length to 90F -> adjusts template to 10..99
+        if (result == 0) {
+            focused_range = {2, 10, 109};
+            mock_moved_section_frame = -1;
+            created_media.clear();
+            mock_timeline_objects.clear();
+            item_changes.clear();
+            object_names.clear();
+            layer_names.clear();
+
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_GAME_FILE", L"C:\\media\\game.mp4");
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_BOTTOM_RIGHT_FILE", L"");
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_GAME_LENGTH", L"40");
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_BOTTOM_RIGHT_LENGTH", L"");
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_EDIT_INDEX", L"0");
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_EDIT_NEW_LENGTH", L"90");
+            place_button->callback(&adjust_edit);
+
+            if (mock_moved_section_frame != 99 || focused_range.end != 99) {
+                result = fail("editing media length did not adjust the template length");
+            }
+
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_EDIT_INDEX", nullptr);
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_EDIT_NEW_LENGTH", nullptr);
+        }
+
+        // Editing test 2: Move destination of item 0 (game -> bottom-right)
+        if (result == 0) {
+            focused_range = {2, 10, 109};
+            mock_moved_section_frame = -1;
+            created_media.clear();
+            mock_timeline_objects.clear();
+            object_names.clear();
+
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_GAME_FILE", L"C:\\media\\game.mp4");
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_BOTTOM_RIGHT_FILE", L"");
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_GAME_LENGTH", L"50");
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_EDIT_INDEX", L"0");
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_EDIT_MOVE_DEST", L"1");
+            place_button->callback(&adjust_edit);
+
+            if (created_media.empty() || object_names.empty()) {
+                result = fail("moving media destination did not recreate object");
+            } else {
+                bool found_br = false;
+                for (const auto& name : object_names) {
+                    if (name == L"biim: \u53f3\u4e0b\u7d20\u6750") {
+                        found_br = true;
+                        break;
+                    }
+                }
+                if (!found_br) {
+                    result = fail("moved media object was not configured as bottom-right media");
+                }
+            }
+
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_EDIT_INDEX", nullptr);
+            SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_EDIT_MOVE_DEST", nullptr);
+        }
+
+        // Timeline split & sync tests:
+        if (result == 0) {
+            mock_timeline_objects.clear();
+            // Simulate video split into 2 pieces on layer 1:
+            // piece 1: frame 10..49
+            // piece 2: frame 50..139
+            const auto h1 = reinterpret_cast<OBJECT_HANDLE>(201);
+            const auto h2 = reinterpret_cast<OBJECT_HANDLE>(202);
+            mock_timeline_objects.push_back({h1, 1, 10, 49, L"biim: \u30b2\u30fc\u30e0\u7d20\u6750", "file=\"C:\\media\\game.mp4\"\n"});
+            mock_timeline_objects.push_back({h2, 1, 50, 139, L"biim: \u30b2\u30fc\u30e0\u7d20\u6750", "file=\"C:\\media\\game.mp4\"\n"});
+
+            // Bottom-right video on layer 0: frame 10..79
+            const auto h_br = reinterpret_cast<OBJECT_HANDLE>(203);
+            mock_timeline_objects.push_back({h_br, 0, 10, 79, L"biim: \u53f3\u4e0b\u7d20\u6750", "file=\"C:\\media\\speaker.png\"\n"});
+
+            // Template is on layer 2, currently frame 10..49
+            focused_range = {2, 10, 49};
+            mock_moved_section_frame = -1;
+
+            // Sync template to media: should find max_end among all split clips = 139!
+            sync_to_media_button->callback(&adjust_edit);
+
+            if (focused_range.end != 139 || mock_moved_section_frame != 139) {
+                result = fail("sync_to_media_button did not adapt template to split timeline clips");
+            }
+
+            // Sync media to template: shorten template to frame 80, sync media
+            if (result == 0) {
+                focused_range.end = 80;
+                mock_moved_section_frame = -1;
+                sync_to_template_button->callback(&adjust_edit);
+
+                if (mock_timeline_objects[1].end != 80 || mock_timeline_objects[2].end != 80) {
+                    result = fail("sync_to_template_button did not adjust media ends to match template");
+                }
+            }
+
+            // Jump to timeline selection:
+            if (result == 0) {
+                mock_cursor_layer = -1;
+                mock_cursor_frame = -1;
+                mock_display_frame = -1;
+                SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_GAME_FILE", L"");
+                SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_BOTTOM_RIGHT_FILE", L"");
+                SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_SELECT_INDEX", L"1");
+                place_button->callback(&adjust_edit);
+
+                if (mock_focused_obj != h2 || mock_cursor_layer != 1 || mock_cursor_frame != 50 || mock_display_frame != 50) {
+                    result = fail("order_select_timeline_id did not set focus, cursor, and display frame to the split clip");
+                }
+                SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_SELECT_INDEX", nullptr);
+            }
+
+            // Timeline split template sync test:
+            if (result == 0) {
+                mock_timeline_objects.clear();
+                const auto h_media = reinterpret_cast<OBJECT_HANDLE>(301);
+                mock_timeline_objects.push_back({h_media, 1, 10, 150, L"biim: \u30b2\u30fc\u30e0\u7d20\u6750", "file=\"C:\\media\\game.mp4\"\n"});
+
+                const auto h_tmpl1 = reinterpret_cast<OBJECT_HANDLE>(100);
+                const auto h_tmpl2 = reinterpret_cast<OBJECT_HANDLE>(302);
+                mock_timeline_objects.push_back({h_tmpl1, 2, 10, 49, L"biim\u30c6\u30f3\u30d7\u30ec\u30fc\u30c8", ""});
+                mock_timeline_objects.push_back({h_tmpl2, 2, 50, 89, L"biim\u30c6\u30f3\u30d7\u30ec\u30fc\u30c8", ""});
+
+                focused_range = {2, 10, 49};
+                mock_focused_obj = h_tmpl1;
+                mock_moved_section_frame = -1;
+
+                sync_to_media_button->callback(&adjust_edit);
+
+                if (mock_timeline_objects[2].end != 150 || mock_moved_section_frame != 150) {
+                    result = fail("sync_to_media_button did not extend the last split template piece to media end");
+                } else if (mock_timeline_objects[1].end != 49) {
+                    result = fail("sync_to_media_button clobbered earlier split template piece");
+                }
+            }
+
+            // Dynamic text switching tests:
+            if (result == 0) {
+                auto* caption_item = static_cast<FILTER_ITEM_TEXT*>(find_filter_item(
+                    table, L"\u4e0b\u6b04\u306e\u672c\u6587", L"text"));
+                auto* speaker_item = static_cast<FILTER_ITEM_STRING*>(find_filter_item(
+                    table, L"\u8a71\u8005\u540d", L"string"));
+                auto* title_item = static_cast<FILTER_ITEM_STRING*>(find_filter_item(
+                    table, L"\u53f3\u6b04\u306e\u898b\u51fa\u3057", L"string"));
+                auto* side_item = static_cast<FILTER_ITEM_TEXT*>(find_filter_item(
+                    table, L"\u53f3\u6b04\u306e\u672c\u6587", L"text"));
+
+                if (!caption_item || !speaker_item || !title_item || !side_item) {
+                    result = fail("text filter items not found");
+                } else {
+                    LPCWSTR orig_caption = caption_item->value;
+                    LPCWSTR orig_speaker = speaker_item->value;
+                    LPCWSTR orig_title = title_item->value;
+                    LPCWSTR orig_side = side_item->value;
+
+                    // Test A: Frame tags in caption and speaker override
+                    caption_item->value = L"[0F] Caption A\n[60F] Caption B\n[120F:SpeakerZ] Caption C";
+                    speaker_item->value = L"DefaultSpeaker";
+
+                    object.frame = 0;
+                    object.time = 0.0;
+                    table->func_proc_video(&video);
+                    auto pixels_f0 = captured_pixels;
+
+                    object.frame = 30;
+                    object.time = 0.5;
+                    table->func_proc_video(&video);
+                    if (!pixels_equal(captured_pixels, pixels_f0)) {
+                        result = fail("text changed prematurely before frame tag");
+                    }
+
+                    if (result == 0) {
+                        object.frame = 60;
+                        object.time = 1.0;
+                        table->func_proc_video(&video);
+                        auto pixels_f60 = captured_pixels;
+                        if (pixels_equal(pixels_f60, pixels_f0)) {
+                            result = fail("text did not change at [60F]");
+                        }
+
+                        if (result == 0) {
+                            object.frame = 120;
+                            object.time = 2.0;
+                            table->func_proc_video(&video);
+                            auto pixels_f120 = captured_pixels;
+                            if (pixels_equal(pixels_f120, pixels_f60) || pixels_equal(pixels_f120, pixels_f0)) {
+                                result = fail("text and speaker did not change at [120F:SpeakerZ]");
+                            }
+                        }
+                    }
+
+                    // Test B: Section separators with intermediate points
+                    if (result == 0) {
+                        caption_item->value = L"Sec 1 Text\n---\nSec 2 Text\n---\nSec 3 Text";
+                        mock_custom_section_count = 3;
+                        mock_section_frames = {0, 60, 120};
+                        video.edit = &adjust_edit;
+                        object.layer = 2;
+                        object.frame_s = 0;
+
+                        mock_timeline_objects.clear();
+                        const auto h_test_tmpl = reinterpret_cast<OBJECT_HANDLE>(100);
+                        mock_timeline_objects.push_back({h_test_tmpl, 2, 0, 200, L"biim\u30c6\u30f3\u30d7\u30ec\u30fc\u30c8", ""});
+
+                        object.frame = 10;
+                        object.time = 0.16;
+                        table->func_proc_video(&video);
+                        auto pixels_sec1 = captured_pixels;
+
+                        object.frame = 70;
+                        object.time = 1.16;
+                        table->func_proc_video(&video);
+                        auto pixels_sec2 = captured_pixels;
+                        if (pixels_equal(pixels_sec2, pixels_sec1)) {
+                            result = fail("caption did not change at intermediate point section 2");
+                        }
+
+                        if (result == 0) {
+                            object.frame = 130;
+                            object.time = 2.16;
+                            table->func_proc_video(&video);
+                            auto pixels_sec3 = captured_pixels;
+                            if (pixels_equal(pixels_sec3, pixels_sec2) || pixels_equal(pixels_sec3, pixels_sec1)) {
+                                result = fail("caption did not change at intermediate point section 3");
+                            }
+                        }
+                    }
+
+                    // Test C: Time tags [m:ss]
+                    if (result == 0) {
+                        caption_item->value = L"[0:00] Time 0s Text\n[0:02] Time 2s Text";
+                        mock_custom_section_count = 1;
+                        mock_section_frames.clear();
+                        video.edit = nullptr;
+
+                        object.frame = 0;
+                        object.time = 0.0;
+                        table->func_proc_video(&video);
+                        auto pixels_t0 = captured_pixels;
+
+                        object.frame = 120;
+                        object.time = 2.0;
+                        table->func_proc_video(&video);
+                        auto pixels_t2 = captured_pixels;
+                        if (pixels_equal(pixels_t2, pixels_t0)) {
+                            result = fail("caption did not change at [0:02] time tag");
+                        }
+                    }
+
+                    // Restore original filter values
+                    caption_item->value = orig_caption;
+                    speaker_item->value = orig_speaker;
+                    title_item->value = orig_title;
+                    side_item->value = orig_side;
+                    video.edit = nullptr;
+                }
+            }
+        }
+
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_HEADLESS_TEST", nullptr);
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_GAME_FILE", nullptr);
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_BOTTOM_RIGHT_FILE", nullptr);
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_GAME_LENGTH", nullptr);
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_BOTTOM_RIGHT_LENGTH", nullptr);
     }
 
     table->func_destroy(1, userdata);

@@ -31,28 +31,25 @@ auto padding = FILTER_ITEM_TRACK(L"\u4f59\u767d (px)", 20.0, 0.0, 120.0, 1.0);
 auto separator_width = FILTER_ITEM_TRACK(L"\u533a\u5207\u308a\u7dda (px)", 4.0, 0.0, 32.0, 1.0);
 auto auto_scale = FILTER_ITEM_CHECK(L"720p\u57fa\u6e96\u3067\u62e1\u7e2e", true);
 
-void place_media_files(EDIT_SECTION* edit);
-void place_game_media_sequence(EDIT_SECTION* edit);
-void edit_game_media_order(EDIT_SECTION* edit);
-void place_bottom_right_media_sequence(EDIT_SECTION* edit);
-void edit_bottom_right_media_order(EDIT_SECTION* edit);
+void open_media_manager(EDIT_SECTION* edit);
+void sync_template_to_timeline_media(EDIT_SECTION* edit, bool quiet = false);
+void sync_timeline_media_to_template(EDIT_SECTION* edit);
+
+void sync_template_button_callback(EDIT_SECTION* edit) {
+    sync_template_to_timeline_media(edit, false);
+}
 
 auto media_group = FILTER_ITEM_GROUP(L"\u52d5\u753b\u30fb\u753b\u50cf");
 constexpr wchar_t media_file_filter[] =
     L"Media Files (*.mp4;*.mkv;*.avi;*.mov;*.webm;*.png;*.jpg;*.jpeg;*.bmp;*.webp)\0"
     L"*.mp4;*.mkv;*.avi;*.mov;*.webm;*.png;*.jpg;*.jpeg;*.bmp;*.webp\0"
     L"All Files (*.*)\0*.*\0";
-auto game_media_file = FILTER_ITEM_FILE(L"\u30b2\u30fc\u30e0\u6b04\u306e\u52d5\u753b\u30fb\u753b\u50cf", L"", media_file_filter);
-auto bottom_right_media_file = FILTER_ITEM_FILE(L"\u53f3\u4e0b\u306e\u52d5\u753b\u30fb\u753b\u50cf", L"", media_file_filter);
-auto place_media_button = FILTER_ITEM_BUTTON(L"\u9078\u3093\u3060\u7d20\u6750\u3092\u914d\u7f6e", place_media_files);
-auto place_game_sequence_button = FILTER_ITEM_BUTTON(
-    L"\u30b2\u30fc\u30e0\u6b04\u3078\u8907\u6570\u7d20\u6750\u3092\u8ffd\u52a0", place_game_media_sequence);
-auto edit_game_sequence_button = FILTER_ITEM_BUTTON(
-    L"\u30b2\u30fc\u30e0\u7d20\u6750\u306e\u9806\u756a\u3092\u64cd\u4f5c", edit_game_media_order);
-auto place_bottom_right_sequence_button = FILTER_ITEM_BUTTON(
-    L"\u53f3\u4e0b\u6b04\u3078\u8907\u6570\u7d20\u6750\u3092\u8ffd\u52a0", place_bottom_right_media_sequence);
-auto edit_bottom_right_sequence_button = FILTER_ITEM_BUTTON(
-    L"\u53f3\u4e0b\u7d20\u6750\u306e\u9806\u756a\u3092\u64cd\u4f5c", edit_bottom_right_media_order);
+auto place_media_button = FILTER_ITEM_BUTTON(
+    L"\u7d20\u6750\u306e\u8ffd\u52a0\u30fb\u7de8\u96c6", open_media_manager);
+auto sync_to_media_button = FILTER_ITEM_BUTTON(
+    L"\u9577\u3055\u3092\u7d20\u6750\u306b\u5408\u308f\u305b\u308b", sync_template_button_callback);
+auto sync_to_template_button = FILTER_ITEM_BUTTON(
+    L"\u7d20\u6750\u3092\u67a0\u306e\u9577\u3055\u306b\u5408\u308f\u305b\u308b", sync_timeline_media_to_template);
 auto bottom_right_transparent = FILTER_ITEM_CHECK(L"\u53f3\u4e0b\u6b04\u3092\u900f\u904e", false);
 
 auto background_group = FILTER_ITEM_GROUP(L"\u80cc\u666f");
@@ -92,13 +89,9 @@ void* filter_items[] = {
     &separator_width,
     &auto_scale,
     &media_group,
-    &game_media_file,
-    &bottom_right_media_file,
     &place_media_button,
-    &place_game_sequence_button,
-    &edit_game_sequence_button,
-    &place_bottom_right_sequence_button,
-    &edit_bottom_right_sequence_button,
+    &sync_to_media_button,
+    &sync_to_template_button,
     &bottom_right_transparent,
     &background_group,
     &sidebar_color,
@@ -147,7 +140,6 @@ struct Settings {
     Rgb game_background{};
     int background_opacity = 96;
     Rgb separator{};
-    std::wstring bottom_right_media;
     bool bottom_right_is_transparent = false;
     std::wstring title;
     std::wstring side_text;
@@ -202,7 +194,6 @@ Settings read_settings() {
     result.game_background = read_color(game_color);
     result.background_opacity = std::clamp(rounded_track(panel_opacity.value), 0, 100);
     result.separator = read_color(separator_color);
-    result.bottom_right_media = read_text(bottom_right_media_file.value);
     result.bottom_right_is_transparent = bottom_right_transparent.value;
     result.title = read_text(sidebar_title.value);
     result.side_text = read_text(sidebar_text.value);
@@ -416,6 +407,342 @@ void draw_text_block(
     DeleteObject(font);
 }
 
+bool is_separator_line(const std::wstring& line) {
+    if (line.empty()) return false;
+    std::size_t start = line.find_first_not_of(L" \t\r\n");
+    if (start == std::wstring::npos) return false;
+    std::size_t end = line.find_last_not_of(L" \t\r\n");
+    const std::wstring trimmed = line.substr(start, end - start + 1);
+    if (trimmed.size() < 3) return false;
+    bool all_dash = true;
+    bool all_equal = true;
+    for (wchar_t ch : trimmed) {
+        if (ch != L'-') all_dash = false;
+        if (ch != L'=') all_equal = false;
+    }
+    return all_dash || all_equal;
+}
+
+std::wstring trim_blank_lines(const std::wstring& text) {
+    if (text.empty()) return {};
+    std::size_t start = text.find_first_not_of(L" \t\r\n");
+    if (start == std::wstring::npos) return {};
+    std::size_t end = text.find_last_not_of(L" \t\r\n");
+    return text.substr(start, end - start + 1);
+}
+
+bool parse_time_or_section(
+    const std::wstring& spec,
+    int section_count,
+    int& out_sec,
+    int& out_frame,
+    double& out_time) {
+    out_sec = -1;
+    out_frame = -1;
+    out_time = -1.0;
+    if (spec.empty()) {
+        return false;
+    }
+
+    std::wstring s = spec;
+    std::size_t start = s.find_first_not_of(L" \t\r\n");
+    if (start != std::wstring::npos) {
+        std::size_t end = s.find_last_not_of(L" \t\r\n");
+        s = s.substr(start, end - start + 1);
+    }
+    if (s.empty()) {
+        return false;
+    }
+
+    if (s.rfind(L"\u533a\u9593", 0) == 0) {
+        s = s.substr(2);
+        out_sec = _wtoi(s.c_str());
+        return out_sec > 0;
+    }
+    if (s.size() >= 3 && (_wcsnicmp(s.c_str(), L"sec", 3) == 0)) {
+        s = s.substr(3);
+        out_sec = _wtoi(s.c_str());
+        return out_sec > 0;
+    }
+
+    if (s.size() > 1 && (s.back() == L's' || s.back() == L'S')) {
+        wchar_t* end_ptr = nullptr;
+        out_time = std::wcstod(s.substr(0, s.size() - 1).c_str(), &end_ptr);
+        return end_ptr && *end_ptr == L'\0' && out_time >= 0.0;
+    }
+
+    if (s.size() > 1 && (s.back() == L'f' || s.back() == L'F')) {
+        wchar_t* end_ptr = nullptr;
+        long val = std::wcstol(s.substr(0, s.size() - 1).c_str(), &end_ptr, 10);
+        if (end_ptr && *end_ptr == L'\0' && val >= 0) {
+            out_frame = static_cast<int>(val);
+            return true;
+        }
+        return false;
+    }
+
+    const std::size_t first_colon = s.find(L':');
+    if (first_colon != std::wstring::npos) {
+        const std::size_t second_colon = s.find(L':', first_colon + 1);
+        if (second_colon != std::wstring::npos) {
+            const std::wstring hr_str = s.substr(0, first_colon);
+            const std::wstring min_str = s.substr(first_colon + 1, second_colon - first_colon - 1);
+            const std::wstring sec_str = s.substr(second_colon + 1);
+            wchar_t* end_hr = nullptr;
+            wchar_t* end_min = nullptr;
+            wchar_t* end_sec = nullptr;
+            const double hr_val = std::wcstod(hr_str.c_str(), &end_hr);
+            const double min_val = std::wcstod(min_str.c_str(), &end_min);
+            const double sec_val = std::wcstod(sec_str.c_str(), &end_sec);
+            if (end_hr && *end_hr == L'\0' && end_min && *end_min == L'\0' && end_sec && *end_sec == L'\0') {
+                out_time = hr_val * 3600.0 + min_val * 60.0 + sec_val;
+                return out_time >= 0.0;
+            }
+        } else {
+            const std::wstring min_str = s.substr(0, first_colon);
+            const std::wstring sec_str = s.substr(first_colon + 1);
+            wchar_t* end_min = nullptr;
+            wchar_t* end_sec = nullptr;
+            const double min_val = std::wcstod(min_str.c_str(), &end_min);
+            const double sec_val = std::wcstod(sec_str.c_str(), &end_sec);
+            if (end_min && *end_min == L'\0' && end_sec && *end_sec == L'\0') {
+                out_time = min_val * 60.0 + sec_val;
+                return out_time >= 0.0;
+            }
+        }
+    }
+
+    wchar_t* end_ptr = nullptr;
+    long val = std::wcstol(s.c_str(), &end_ptr, 10);
+    if (end_ptr && *end_ptr == L'\0') {
+        if (val > 0 && section_count > 1 && val <= section_count) {
+            out_sec = static_cast<int>(val);
+            return true;
+        }
+        if (val >= 0) {
+            out_frame = static_cast<int>(val);
+            return true;
+        }
+    }
+
+    return false;
+}
+
+struct TimedTextEntry {
+    int section = -1;
+    int frame = -1;
+    double time = -1.0;
+    std::wstring speaker;
+    std::wstring text;
+};
+
+std::wstring resolve_timed_text(
+    const std::wstring& raw,
+    int current_frame,
+    double current_time,
+    int current_section,
+    int section_count,
+    std::wstring* out_speaker = nullptr,
+    double fps = 30.0) {
+    if (raw.empty()) {
+        return {};
+    }
+
+    if (raw.find(L'[') == std::wstring::npos &&
+        raw.find(L"---") == std::wstring::npos &&
+        raw.find(L"===") == std::wstring::npos) {
+        return raw;
+    }
+
+    std::vector<std::wstring> raw_lines;
+    {
+        std::size_t pos = 0;
+        while (pos < raw.size()) {
+            std::size_t next_line = raw.find_first_of(L"\r\n", pos);
+            if (next_line == std::wstring::npos) {
+                next_line = raw.size();
+            }
+            raw_lines.push_back(raw.substr(pos, next_line - pos));
+            pos = raw.find_first_not_of(L"\r\n", next_line);
+        }
+    }
+
+    bool has_sep = false;
+    for (const auto& line : raw_lines) {
+        if (is_separator_line(line)) {
+            has_sep = true;
+            break;
+        }
+    }
+
+    std::vector<TimedTextEntry> entries;
+
+    if (has_sep) {
+        std::wstring current_chunk;
+        int chunk_idx = 0;
+        auto finish_chunk = [&](const std::wstring& chunk) {
+            TimedTextEntry e{};
+            e.section = chunk_idx + 1;
+            std::wstring trimmed = trim_blank_lines(chunk);
+            if (!trimmed.empty() && trimmed.front() == L'[') {
+                std::size_t close_bracket = trimmed.find(L']');
+                if (close_bracket != std::wstring::npos) {
+                    std::wstring tag_body = trimmed.substr(1, close_bracket - 1);
+                    int s = -1, f = -1;
+                    double t = -1.0;
+                    if (parse_time_or_section(tag_body, section_count, s, f, t)) {
+                        if (s > 0) e.section = s;
+                        if (f >= 0) e.frame = f;
+                        if (t >= 0.0) e.time = t;
+                    } else {
+                        std::size_t last_col = tag_body.rfind(L':');
+                        if (last_col != std::wstring::npos &&
+                            parse_time_or_section(tag_body.substr(0, last_col), section_count, s, f, t)) {
+                            if (s > 0) e.section = s;
+                            if (f >= 0) e.frame = f;
+                            if (t >= 0.0) e.time = t;
+                            e.speaker = tag_body.substr(last_col + 1);
+                        } else {
+                            e.speaker = tag_body;
+                        }
+                    }
+                    trimmed = trim_blank_lines(trimmed.substr(close_bracket + 1));
+                }
+            }
+            e.text = std::move(trimmed);
+            entries.push_back(std::move(e));
+            ++chunk_idx;
+        };
+
+        for (const auto& line : raw_lines) {
+            if (is_separator_line(line)) {
+                finish_chunk(current_chunk);
+                current_chunk.clear();
+            } else {
+                if (!current_chunk.empty()) {
+                    current_chunk.push_back(L'\n');
+                }
+                current_chunk.append(line);
+            }
+        }
+        finish_chunk(current_chunk);
+    } else {
+        TimedTextEntry current_entry{};
+        bool has_entry = false;
+        std::wstring current_text;
+
+        for (const auto& line : raw_lines) {
+            std::size_t first_char = line.find_first_not_of(L" \t");
+            if (first_char != std::wstring::npos && line[first_char] == L'[') {
+                std::size_t close_bracket = line.find(L']', first_char + 1);
+                if (close_bracket != std::wstring::npos) {
+                    std::wstring tag_body = line.substr(first_char + 1, close_bracket - first_char - 1);
+                    int s = -1, f = -1;
+                    double t = -1.0;
+                    std::wstring spk;
+                    bool parsed = false;
+
+                    if (parse_time_or_section(tag_body, section_count, s, f, t)) {
+                        parsed = true;
+                    } else {
+                        std::size_t last_col = tag_body.rfind(L':');
+                        if (last_col != std::wstring::npos &&
+                            parse_time_or_section(tag_body.substr(0, last_col), section_count, s, f, t)) {
+                            spk = tag_body.substr(last_col + 1);
+                            parsed = true;
+                        } else {
+                            spk = tag_body;
+                            parsed = true;
+                        }
+                    }
+
+                    if (parsed) {
+                        if (has_entry) {
+                            current_entry.text = trim_blank_lines(current_text);
+                            entries.push_back(std::move(current_entry));
+                            current_entry = {};
+                            current_text.clear();
+                        }
+                        has_entry = true;
+                        current_entry.section = s;
+                        current_entry.frame = f;
+                        current_entry.time = t;
+                        current_entry.speaker = spk;
+
+                        std::wstring remainder = line.substr(close_bracket + 1);
+                        std::size_t r_start = remainder.find_first_not_of(L" \t");
+                        if (r_start != std::wstring::npos) {
+                            current_text.append(remainder.substr(r_start));
+                        }
+                        continue;
+                    }
+                }
+            }
+
+            if (!has_entry) {
+                has_entry = true;
+                current_entry.section = 1;
+                current_entry.frame = 0;
+            }
+            if (!current_text.empty()) {
+                current_text.push_back(L'\n');
+            }
+            current_text.append(line);
+        }
+
+        if (has_entry) {
+            current_entry.text = trim_blank_lines(current_text);
+            entries.push_back(std::move(current_entry));
+        }
+    }
+
+    if (entries.empty()) {
+        return raw;
+    }
+
+    int best_index = 0;
+    double best_pos = -1.0;
+
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        const auto& e = entries[i];
+        bool matches = false;
+        double pos = -1.0;
+
+        if (e.section > 0 && section_count > 1) {
+            if ((current_section + 1) >= e.section) {
+                matches = true;
+                pos = static_cast<double>(e.section) * 100000.0;
+            }
+        } else if (e.frame >= 0) {
+            if (current_frame >= e.frame) {
+                matches = true;
+                pos = static_cast<double>(e.frame);
+            }
+        } else if (e.time >= 0.0) {
+            if (current_time >= e.time) {
+                matches = true;
+                pos = e.time * (fps > 0 ? fps : 30.0);
+            }
+        } else if (e.section > 0 && section_count <= 1) {
+            if (i == 0) {
+                matches = true;
+                pos = 0.0;
+            }
+        }
+
+        if (matches && pos >= best_pos) {
+            best_pos = pos;
+            best_index = static_cast<int>(i);
+        }
+    }
+
+    const auto& best_entry = entries[static_cast<std::size_t>(best_index)];
+    if (out_speaker && !best_entry.speaker.empty()) {
+        *out_speaker = best_entry.speaker;
+    }
+    return best_entry.text;
+}
+
 bool render_template(RenderCache& cache, const Settings& settings, int width, int height) {
     if (width <= 0 || height <= 0 || width > 16384 || height > 16384) {
         return false;
@@ -459,7 +786,7 @@ bool render_template(RenderCache& cache, const Settings& settings, int width, in
                    settings.sidebar_background, panel_alpha);
     fill_rectangle(cache.pixels, width, height, 0, game_bottom, game_right, height,
                    settings.bottom_background, panel_alpha);
-    if (settings.bottom_right_media.empty() && !settings.bottom_right_is_transparent) {
+    if (!settings.bottom_right_is_transparent) {
         fill_rectangle(cache.pixels, width, height, game_right, game_bottom, width, height,
                        settings.bottom_right_background, panel_alpha);
     }
@@ -787,6 +1114,10 @@ bool create_media_object(
 }
 
 void show_media_message(LPCWSTR message) {
+    wchar_t headless[16]{};
+    if (GetEnvironmentVariableW(L"BIIM_TEMPLATE_HEADLESS_TEST", headless, 16) > 0) {
+        return;
+    }
     MessageBoxW(
         GetActiveWindow(),
         message,
@@ -794,111 +1125,7 @@ void show_media_message(LPCWSTR message) {
         MB_OK | MB_ICONINFORMATION);
 }
 
-void place_media_files(EDIT_SECTION* edit) {
-    if (!edit || !edit->info || !edit->get_focus_object ||
-        !edit->get_object_layer_frame || !edit->find_object) {
-        return;
-    }
 
-    const bool has_game_media = game_media_file.value && *game_media_file.value;
-    const bool has_bottom_right_media = bottom_right_media_file.value && *bottom_right_media_file.value;
-    if (!has_game_media && !has_bottom_right_media) {
-        show_media_message(
-            L"\u52d5\u753b\u307e\u305f\u306f\u753b\u50cf\u3092\u9078\u3093\u3067\u304b\u3089\u914d\u7f6e\u3057\u3066\u304f\u3060\u3055\u3044\u3002");
-        return;
-    }
-
-    OBJECT_HANDLE template_object = edit->get_focus_object();
-    if (!template_object) {
-        show_media_message(
-            L"biim\u30c6\u30f3\u30d7\u30ec\u30fc\u30c8\u3092\u9078\u629e\u3057\u3066\u304b\u3089\u5b9f\u884c\u3057\u3066\u304f\u3060\u3055\u3044\u3002");
-        return;
-    }
-
-    const OBJECT_LAYER_FRAME template_range = edit->get_object_layer_frame(template_object);
-    const int length = std::max(1, template_range.end - template_range.start + 1);
-    const int scene_width = edit->info->width;
-    const int scene_height = edit->info->height;
-    if (scene_width <= 0 || scene_height <= 0) {
-        return;
-    }
-
-    const int game_right = scene_width - std::clamp(
-        static_cast<int>(std::lround(scene_width * sidebar_width.value / 100.0)), 1, scene_width);
-    const int game_bottom = scene_height - std::clamp(
-        static_cast<int>(std::lround(scene_height * bottom_height.value / 100.0)), 1, scene_height);
-    const double resolution_scale = auto_scale.value
-        ? std::clamp(static_cast<double>(scene_height) / 720.0, 0.25, 8.0)
-        : 1.0;
-    const int line_width = std::max(0, static_cast<int>(std::lround(separator_width.value * resolution_scale)));
-    const int left_half = line_width / 2;
-    const int right_half = line_width - left_half;
-
-    const MediaTarget game_target{
-        0.0,
-        0.0,
-        static_cast<double>(std::max(1, game_right - left_half)),
-        static_cast<double>(std::max(1, game_bottom - left_half)),
-    };
-    const MediaTarget bottom_right_target{
-        static_cast<double>(std::min(scene_width, game_right + right_half)),
-        static_cast<double>(std::min(scene_height, game_bottom + right_half)),
-        static_cast<double>(scene_width),
-        static_cast<double>(scene_height),
-    };
-
-    int requested = 0;
-    if (has_game_media) {
-        ++requested;
-    }
-    if (has_bottom_right_media) {
-        ++requested;
-    }
-
-    std::vector<int> media_layers;
-    if (!prepare_media_layers(
-            edit, template_object, template_range, requested, media_layers)) {
-        show_media_message(
-            L"\u7d20\u6750\u3092\u7f6e\u304f\u80cc\u9762\u30ec\u30a4\u30e4\u30fc\u3092\u7528\u610f\u3067\u304d\u307e\u305b\u3093\u3067\u3057\u305f\u3002\n"
-            L"\u30ec\u30a4\u30e4\u30fc\u306e\u30ed\u30c3\u30af\u3092\u5916\u3057\u3066\u304b\u3089\u518d\u5ea6\u914d\u7f6e\u3057\u3066\u304f\u3060\u3055\u3044\u3002");
-        return;
-    }
-
-    int placed = 0;
-    std::size_t layer_index = 0;
-    if (has_game_media) {
-        if (create_media_object(
-                edit,
-                game_media_file.value,
-                media_layers[layer_index++],
-                template_range.start,
-                length,
-                game_target,
-                L"biim: \u30b2\u30fc\u30e0\u7d20\u6750",
-                L"biim: \u30b2\u30fc\u30e0\u7d20\u6750")) {
-            ++placed;
-        }
-    }
-    if (has_bottom_right_media) {
-        if (create_media_object(
-                edit,
-                bottom_right_media_file.value,
-                media_layers[layer_index++],
-                template_range.start,
-                length,
-                bottom_right_target,
-                L"biim: \u53f3\u4e0b\u7d20\u6750",
-                L"biim: \u53f3\u4e0b\u7d20\u6750")) {
-            ++placed;
-        }
-    }
-
-    if (placed != requested) {
-        show_media_message(
-            L"\u4e00\u90e8\u306e\u7d20\u6750\u3092\u914d\u7f6e\u3067\u304d\u307e\u305b\u3093\u3067\u3057\u305f\u3002\n"
-            L"\u7d20\u6750\u306e\u5f62\u5f0f\u3068\u8aad\u307f\u8fbc\u307f\u53ef\u5426\u3092\u78ba\u8a8d\u3057\u3066\u304f\u3060\u3055\u3044\u3002");
-    }
-}
 
 std::vector<std::wstring> open_media_file_dialog() {
     std::vector<wchar_t> buffer(65536, L'\0');
@@ -1010,11 +1237,19 @@ std::wstring get_media_object_path(EDIT_SECTION* edit, OBJECT_HANDLE object) {
     return {};
 }
 
+constexpr int dest_game_radio_id = 2110;
+constexpr int dest_bottom_right_radio_id = 2111;
 constexpr int order_list_id = 2101;
+constexpr int order_add_id = 2107;
+constexpr int order_change_file_id = 2108;
+constexpr int order_move_dest_id = 2109;
 constexpr int order_up_id = 2102;
 constexpr int order_down_id = 2103;
-constexpr int order_add_id = 2107;
 constexpr int order_remove_id = 2104;
+constexpr int order_length_edit_id = 2112;
+constexpr int order_change_length_id = 2113;
+constexpr int order_total_label_id = 2114;
+constexpr int order_select_timeline_id = 2115;
 constexpr int order_accept_id = 2105;
 constexpr int order_cancel_id = 2106;
 
@@ -1022,11 +1257,30 @@ struct MediaOrderItem {
     OBJECT_HANDLE handle = nullptr;
     std::wstring path;
     int length = 1;
+    int start_frame = -1;
+    int end_frame = -1;
 };
 
-struct OrderDialogState {
-    std::vector<MediaOrderItem>* items = nullptr;
-    const EDIT_SECTION* edit = nullptr;
+enum class MediaDestination {
+    game,
+    bottom_right,
+};
+
+struct UnifiedOrderDialogState {
+    EDIT_SECTION* edit = nullptr;
+    OBJECT_HANDLE template_object = nullptr;
+    MediaDestination current_destination = MediaDestination::game;
+
+    std::vector<MediaOrderItem> game_items;
+    std::vector<MediaOrderItem> initial_game_items;
+    int game_target_layer = -1;
+    bool game_modified = false;
+
+    std::vector<MediaOrderItem> bottom_right_items;
+    std::vector<MediaOrderItem> initial_bottom_right_items;
+    int bottom_right_target_layer = -1;
+    bool bottom_right_modified = false;
+
     bool accepted = false;
 };
 
@@ -1040,14 +1294,14 @@ std::wstring media_order_item_display_name(const MediaOrderItem& item, std::size
     } else {
         filename = L"\u914d\u7f6e\u6e08\u307f\u7d20\u6750";
     }
-    return std::to_wstring(index + 1) + L". " + filename + L" (" +
-           std::to_wstring(item.length) + L"F)";
+    std::wstring result = std::to_wstring(index + 1) + L". " + filename + L" (" +
+           std::to_wstring(item.length) + L"F";
+    if (item.start_frame >= 0 && item.end_frame >= item.start_frame) {
+        result += L", " + std::to_wstring(item.start_frame) + L"-" + std::to_wstring(item.end_frame) + L"F";
+    }
+    result += L")";
+    return result;
 }
-
-enum class MediaDestination {
-    game,
-    bottom_right,
-};
 
 int media_sequence_length(const EDIT_INFO& info, const MEDIA_INFO& media) {
     const double frames_per_second = info.rate > 0 && info.scale > 0
@@ -1061,19 +1315,66 @@ int media_sequence_length(const EDIT_INFO& info, const MEDIA_INFO& media) {
         static_cast<double>((std::numeric_limits<int>::max)() / 4)));
 }
 
-void refresh_order_list(HWND window, OrderDialogState* state, int selection) {
-    if (!window || !state || !state->items) {
+std::vector<MediaOrderItem>& get_current_items(UnifiedOrderDialogState* state) {
+    return state->current_destination == MediaDestination::game
+        ? state->game_items
+        : state->bottom_right_items;
+}
+
+void mark_modified(UnifiedOrderDialogState* state) {
+    if (state->current_destination == MediaDestination::game) {
+        state->game_modified = true;
+    } else {
+        state->bottom_right_modified = true;
+    }
+}
+
+void refresh_order_list(HWND window, UnifiedOrderDialogState* state, int selection) {
+    if (!window || !state) {
         return;
     }
     const HWND list = GetDlgItem(window, order_list_id);
     SendMessageW(list, LB_RESETCONTENT, 0, 0);
-    for (std::size_t index = 0; index < state->items->size(); ++index) {
-        const std::wstring label = media_order_item_display_name((*state->items)[index], index);
+    const auto& items = get_current_items(state);
+    for (std::size_t index = 0; index < items.size(); ++index) {
+        const std::wstring label = media_order_item_display_name(items[index], index);
         SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
     }
-    if (!state->items->empty()) {
-        selection = std::clamp(selection, 0, static_cast<int>(state->items->size()) - 1);
+    if (!items.empty()) {
+        selection = std::clamp(selection, 0, static_cast<int>(items.size()) - 1);
         SendMessageW(list, LB_SETCURSEL, selection, 0);
+        SetDlgItemInt(
+            window,
+            order_length_edit_id,
+            static_cast<UINT>(items[static_cast<std::size_t>(selection)].length),
+            FALSE);
+    } else {
+        SetDlgItemTextW(window, order_length_edit_id, L"");
+    }
+
+    int64_t total_length = 0;
+    for (const auto& item : items) {
+        total_length += item.length;
+    }
+    const std::wstring total_str = L"\u5408\u8a08: " + std::to_wstring(total_length) + L"F";
+    SetDlgItemTextW(window, order_total_label_id, total_str.c_str());
+}
+
+void apply_length_edit(HWND window, UnifiedOrderDialogState* state) {
+    if (!window || !state) {
+        return;
+    }
+    auto& items = get_current_items(state);
+    const HWND list = GetDlgItem(window, order_list_id);
+    const int selected = static_cast<int>(SendMessageW(list, LB_GETCURSEL, 0, 0));
+    if (selected >= 0 && selected < static_cast<int>(items.size())) {
+        BOOL success = FALSE;
+        const UINT val = GetDlgItemInt(window, order_length_edit_id, &success, FALSE);
+        if (success && val > 0 && static_cast<int>(val) != items[static_cast<std::size_t>(selected)].length) {
+            items[static_cast<std::size_t>(selected)].length = static_cast<int>(val);
+            mark_modified(state);
+            refresh_order_list(window, state, selected);
+        }
     }
 }
 
@@ -1084,80 +1385,169 @@ void set_control_font(HWND control) {
     }
 }
 
-LRESULT CALLBACK order_dialog_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
-    auto* state = reinterpret_cast<OrderDialogState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+LRESULT CALLBACK unified_order_dialog_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+    auto* state = reinterpret_cast<UnifiedOrderDialogState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
     if (message == WM_NCCREATE) {
         const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lparam);
-        state = static_cast<OrderDialogState*>(create->lpCreateParams);
+        state = static_cast<UnifiedOrderDialogState*>(create->lpCreateParams);
         SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
     }
 
     switch (message) {
         case WM_CREATE: {
             set_control_font(CreateWindowExW(
+                0, L"STATIC", L"\u914d\u7f6e\u5148:",
+                WS_CHILD | WS_VISIBLE,
+                14, 14, 55, 20, window,
+                nullptr, GetModuleHandleW(nullptr), nullptr));
+            set_control_font(CreateWindowExW(
+                0, L"BUTTON", L"\u30b2\u30fc\u30e0\u6b04",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON | WS_GROUP,
+                72, 12, 85, 24, window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(dest_game_radio_id)),
+                GetModuleHandleW(nullptr), nullptr));
+            set_control_font(CreateWindowExW(
+                0, L"BUTTON", L"\u53f3\u4e0b\u6b04",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON,
+                162, 12, 85, 24, window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(dest_bottom_right_radio_id)),
+                GetModuleHandleW(nullptr), nullptr));
+
+            CheckRadioButton(
+                window, dest_game_radio_id, dest_bottom_right_radio_id,
+                state->current_destination == MediaDestination::game
+                    ? dest_game_radio_id
+                    : dest_bottom_right_radio_id);
+
+            set_control_font(CreateWindowExW(
                 WS_EX_CLIENTEDGE, L"LISTBOX", L"",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY,
-                12, 12, 430, 330, window,
+                12, 42, 430, 290, window,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(order_list_id)), GetModuleHandleW(nullptr), nullptr));
+
+            set_control_font(CreateWindowExW(
+                0, L"BUTTON", L"\u7d20\u6750\u3092\u8ffd\u52a0",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                454, 42, 110, 30, window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(order_add_id)), GetModuleHandleW(nullptr), nullptr));
+            set_control_font(CreateWindowExW(
+                0, L"BUTTON", L"\u30d5\u30a1\u30a4\u30eb\u3092\u5909\u66f4",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                454, 78, 110, 30, window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(order_change_file_id)), GetModuleHandleW(nullptr), nullptr));
+            set_control_font(CreateWindowExW(
+                0, L"BUTTON", L"\u914d\u7f6e\u5148\u3092\u5909\u66f4",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                454, 114, 110, 30, window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(order_move_dest_id)), GetModuleHandleW(nullptr), nullptr));
             set_control_font(CreateWindowExW(
                 0, L"BUTTON", L"\u4e0a\u3078",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                454, 12, 105, 32, window,
+                454, 150, 110, 30, window,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(order_up_id)), GetModuleHandleW(nullptr), nullptr));
             set_control_font(CreateWindowExW(
                 0, L"BUTTON", L"\u4e0b\u3078",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                454, 52, 105, 32, window,
+                454, 186, 110, 30, window,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(order_down_id)), GetModuleHandleW(nullptr), nullptr));
-            set_control_font(CreateWindowExW(
-                0, L"BUTTON", L"\u7d20\u6750\u3092\u8ffd\u52a0",
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                454, 98, 105, 32, window,
-                reinterpret_cast<HMENU>(static_cast<INT_PTR>(order_add_id)), GetModuleHandleW(nullptr), nullptr));
             set_control_font(CreateWindowExW(
                 0, L"BUTTON", L"\u4e00\u89a7\u304b\u3089\u5916\u3059",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                454, 138, 105, 32, window,
+                454, 222, 110, 30, window,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(order_remove_id)), GetModuleHandleW(nullptr), nullptr));
+            set_control_font(CreateWindowExW(
+                0, L"BUTTON", L"\u30bf\u30a4\u30e0\u30e9\u30a4\u30f3\u3067\u9078\u629e",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                454, 258, 110, 30, window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(order_select_timeline_id)), GetModuleHandleW(nullptr), nullptr));
+
+            set_control_font(CreateWindowExW(
+                0, L"STATIC", L"\u9078\u629e\u7d20\u6750\u306e\u9577\u3055:",
+                WS_CHILD | WS_VISIBLE,
+                14, 345, 110, 20, window,
+                nullptr, GetModuleHandleW(nullptr), nullptr));
+            set_control_font(CreateWindowExW(
+                WS_EX_CLIENTEDGE, L"EDIT", L"",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL,
+                128, 342, 65, 24, window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(order_length_edit_id)), GetModuleHandleW(nullptr), nullptr));
+            set_control_font(CreateWindowExW(
+                0, L"STATIC", L"\u30d5\u30ec\u30fc\u30e0",
+                WS_CHILD | WS_VISIBLE,
+                198, 345, 60, 20, window,
+                nullptr, GetModuleHandleW(nullptr), nullptr));
+            set_control_font(CreateWindowExW(
+                0, L"BUTTON", L"\u9577\u3055\u3092\u9069\u7528",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                264, 340, 95, 28, window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(order_change_length_id)), GetModuleHandleW(nullptr), nullptr));
+
+            set_control_font(CreateWindowExW(
+                0, L"STATIC", L"\u5408\u8a08: 0F",
+                WS_CHILD | WS_VISIBLE,
+                14, 395, 250, 20, window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(order_total_label_id)), GetModuleHandleW(nullptr), nullptr));
+
             set_control_font(CreateWindowExW(
                 0, L"BUTTON", L"\u914d\u7f6e",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-                342, 354, 105, 34, window,
+                342, 388, 105, 34, window,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(order_accept_id)), GetModuleHandleW(nullptr), nullptr));
             set_control_font(CreateWindowExW(
                 0, L"BUTTON", L"\u30ad\u30e3\u30f3\u30bb\u30eb",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                454, 354, 105, 34, window,
+                454, 388, 110, 34, window,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(order_cancel_id)), GetModuleHandleW(nullptr), nullptr));
+
             refresh_order_list(window, state, 0);
             return 0;
         }
         case WM_COMMAND: {
-            if (!state || !state->items) {
+            if (!state) {
                 break;
             }
             const int command = LOWORD(wparam);
+            if (command == dest_game_radio_id) {
+                if (state->current_destination != MediaDestination::game) {
+                    state->current_destination = MediaDestination::game;
+                    refresh_order_list(window, state, 0);
+                }
+                return 0;
+            }
+            if (command == dest_bottom_right_radio_id) {
+                if (state->current_destination != MediaDestination::bottom_right) {
+                    state->current_destination = MediaDestination::bottom_right;
+                    refresh_order_list(window, state, 0);
+                }
+                return 0;
+            }
+
+            auto& items = get_current_items(state);
             const HWND list = GetDlgItem(window, order_list_id);
             const int selected = static_cast<int>(SendMessageW(list, LB_GETCURSEL, 0, 0));
-            if (command == order_up_id && selected > 0) {
-                std::swap((*state->items)[static_cast<std::size_t>(selected)],
-                          (*state->items)[static_cast<std::size_t>(selected - 1)]);
-                refresh_order_list(window, state, selected - 1);
+
+            if (command == order_list_id && HIWORD(wparam) == LBN_SELCHANGE) {
+                if (selected >= 0 && selected < static_cast<int>(items.size())) {
+                    SetDlgItemInt(
+                        window,
+                        order_length_edit_id,
+                        static_cast<UINT>(items[static_cast<std::size_t>(selected)].length),
+                        FALSE);
+                }
                 return 0;
             }
-            if (command == order_down_id && selected >= 0 &&
-                selected + 1 < static_cast<int>(state->items->size())) {
-                std::swap((*state->items)[static_cast<std::size_t>(selected)],
-                          (*state->items)[static_cast<std::size_t>(selected + 1)]);
-                refresh_order_list(window, state, selected + 1);
+
+            if (command == order_change_length_id) {
+                apply_length_edit(window, state);
                 return 0;
             }
+
             if (command == order_add_id) {
                 std::vector<std::wstring> added_files = open_media_file_dialog();
                 if (!added_files.empty()) {
-                    int insert_pos = (selected >= 0 && selected < static_cast<int>(state->items->size()))
+                    int insert_pos = (selected >= 0 && selected < static_cast<int>(items.size()))
                         ? selected + 1
-                        : static_cast<int>(state->items->size());
+                        : static_cast<int>(items.size());
                     for (const auto& path : added_files) {
                         int item_len = 150;
                         if (state->edit && state->edit->info) {
@@ -1172,106 +1562,114 @@ LRESULT CALLBACK order_dialog_proc(HWND window, UINT message, WPARAM wparam, LPA
                         new_item.handle = nullptr;
                         new_item.path = path;
                         new_item.length = item_len;
-                        state->items->insert(state->items->begin() + insert_pos, std::move(new_item));
+                        items.insert(items.begin() + insert_pos, std::move(new_item));
                         insert_pos++;
                     }
+                    mark_modified(state);
                     refresh_order_list(window, state, insert_pos - 1);
                 }
                 return 0;
             }
-            if (command == order_remove_id && selected >= 0 &&
-                selected < static_cast<int>(state->items->size())) {
-                state->items->erase(state->items->begin() + selected);
+            if (command == order_change_file_id && selected >= 0 && selected < static_cast<int>(items.size())) {
+                std::vector<std::wstring> chosen = open_media_file_dialog();
+                if (!chosen.empty()) {
+                    auto& item = items[static_cast<std::size_t>(selected)];
+                    item.path = chosen.front();
+                    if (item.handle && state->edit && state->edit->delete_object) {
+                        state->edit->delete_object(item.handle);
+                    }
+                    item.handle = nullptr;
+                    if (state->edit && state->edit->info) {
+                        MEDIA_INFO media{};
+                        if (state->edit->get_media_info &&
+                            state->edit->get_media_info(item.path.c_str(), &media, sizeof(media)) &&
+                            media.width > 0 && media.height > 0) {
+                            item.length = media_sequence_length(*state->edit->info, media);
+                        }
+                    }
+                    mark_modified(state);
+                    refresh_order_list(window, state, selected);
+                }
+                return 0;
+            }
+            if (command == order_move_dest_id && selected >= 0 && selected < static_cast<int>(items.size())) {
+                MediaOrderItem item = std::move(items[static_cast<std::size_t>(selected)]);
+                items.erase(items.begin() + selected);
+                if (item.handle && state->edit && state->edit->delete_object) {
+                    state->edit->delete_object(item.handle);
+                }
+                item.handle = nullptr;
+                if (state->current_destination == MediaDestination::game) {
+                    state->bottom_right_items.push_back(std::move(item));
+                } else {
+                    state->game_items.push_back(std::move(item));
+                }
+                state->game_modified = true;
+                state->bottom_right_modified = true;
                 refresh_order_list(window, state, selected);
                 return 0;
             }
+            if (command == order_up_id && selected > 0) {
+                std::swap(items[static_cast<std::size_t>(selected)],
+                          items[static_cast<std::size_t>(selected - 1)]);
+                mark_modified(state);
+                refresh_order_list(window, state, selected - 1);
+                return 0;
+            }
+            if (command == order_down_id && selected >= 0 &&
+                selected + 1 < static_cast<int>(items.size())) {
+                std::swap(items[static_cast<std::size_t>(selected)],
+                          items[static_cast<std::size_t>(selected + 1)]);
+                mark_modified(state);
+                refresh_order_list(window, state, selected + 1);
+                return 0;
+            }
+            if (command == order_remove_id && selected >= 0 &&
+                selected < static_cast<int>(items.size())) {
+                items.erase(items.begin() + selected);
+                mark_modified(state);
+                refresh_order_list(window, state, selected);
+                return 0;
+            }
+            if (command == order_select_timeline_id && selected >= 0 && selected < static_cast<int>(items.size())) {
+                const auto& item = items[static_cast<std::size_t>(selected)];
+                if (item.handle && state->edit) {
+                    if (state->edit->set_focus_object) {
+                        state->edit->set_focus_object(item.handle);
+                    }
+                    if (state->edit->set_cursor_layer_frame && state->edit->get_object_layer_frame) {
+                        const OBJECT_LAYER_FRAME obj_range = state->edit->get_object_layer_frame(item.handle);
+                        state->edit->set_cursor_layer_frame(obj_range.layer, obj_range.start);
+                        if (state->edit->set_display_layer_frame) {
+                            state->edit->set_display_layer_frame(obj_range.layer, obj_range.start);
+                        }
+                    }
+                }
+                state->accepted = false;
+                DestroyWindow(window);
+                return 0;
+            }
             if (command == order_accept_id) {
-                state->accepted = !state->items->empty();
+                apply_length_edit(window, state);
+                state->accepted = true;
                 DestroyWindow(window);
                 return 0;
             }
             if (command == order_cancel_id) {
+                state->accepted = false;
                 DestroyWindow(window);
                 return 0;
             }
             break;
         }
         case WM_CLOSE:
+            state->accepted = false;
             DestroyWindow(window);
             return 0;
         default:
             break;
     }
     return DefWindowProcW(window, message, wparam, lparam);
-}
-
-bool edit_media_order_dialog(std::vector<MediaOrderItem>& items, const EDIT_SECTION* edit, LPCWSTR title) {
-    constexpr wchar_t class_name[] = L"BiimTemplateMediaOrderWindow";
-    WNDCLASSW window_class{};
-    window_class.lpfnWndProc = order_dialog_proc;
-    window_class.hInstance = GetModuleHandleW(nullptr);
-    window_class.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
-    window_class.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
-    window_class.lpszClassName = class_name;
-    if (!RegisterClassW(&window_class) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
-        return false;
-    }
-
-    OrderDialogState state{&items, edit, false};
-    const HWND owner = GetActiveWindow();
-    RECT rectangle{0, 0, 575, 430};
-    AdjustWindowRectEx(&rectangle, WS_CAPTION | WS_SYSMENU | WS_POPUP, FALSE, WS_EX_DLGMODALFRAME);
-    int x = CW_USEDEFAULT;
-    int y = CW_USEDEFAULT;
-    RECT owner_rectangle{};
-    if (owner && GetWindowRect(owner, &owner_rectangle)) {
-        const int width = rectangle.right - rectangle.left;
-        const int height = rectangle.bottom - rectangle.top;
-        x = owner_rectangle.left + ((owner_rectangle.right - owner_rectangle.left) - width) / 2;
-        y = owner_rectangle.top + ((owner_rectangle.bottom - owner_rectangle.top) - height) / 2;
-    }
-
-    const HWND window = CreateWindowExW(
-        WS_EX_DLGMODALFRAME,
-        class_name,
-        title ? title : L"\u7d20\u6750\u306e\u914d\u7f6e\u9806",
-        WS_CAPTION | WS_SYSMENU | WS_POPUP,
-        x,
-        y,
-        rectangle.right - rectangle.left,
-        rectangle.bottom - rectangle.top,
-        owner,
-        nullptr,
-        GetModuleHandleW(nullptr),
-        &state);
-    if (!window) {
-        return false;
-    }
-
-    if (owner) {
-        EnableWindow(owner, FALSE);
-    }
-    ShowWindow(window, SW_SHOW);
-    UpdateWindow(window);
-    MSG message{};
-    while (IsWindow(window)) {
-        const BOOL result = GetMessageW(&message, nullptr, 0, 0);
-        if (result <= 0) {
-            if (result == 0) {
-                PostQuitMessage(static_cast<int>(message.wParam));
-            }
-            break;
-        }
-        if (!IsDialogMessageW(window, &message)) {
-            TranslateMessage(&message);
-            DispatchMessageW(&message);
-        }
-    }
-    if (owner) {
-        EnableWindow(owner, TRUE);
-        SetActiveWindow(owner);
-    }
-    return state.accepted;
 }
 
 bool calculate_media_targets(
@@ -1333,24 +1731,25 @@ std::vector<MediaOrderItem> collect_placed_media_items(
         LPCWSTR layer_name = edit->get_layer_name ? edit->get_layer_name(layer) : nullptr;
         const bool layer_matches = layer_name && std::wcscmp(layer_name, target_name) == 0;
 
-        int frame = template_range.start;
-        while (frame <= template_range.end) {
+        int frame = 0;
+        while (true) {
             OBJECT_HANDLE obj = edit->find_object(layer, frame);
             if (!obj) {
                 break;
             }
             OBJECT_LAYER_FRAME obj_range = edit->get_object_layer_frame(obj);
-            if (obj_range.start > template_range.end) {
-                break;
-            }
-
             LPCWSTR obj_name = edit->get_object_name ? edit->get_object_name(obj) : nullptr;
             const bool obj_matches = obj_name && std::wcscmp(obj_name, target_name) == 0;
+            const bool other_biim = obj_name && (destination == MediaDestination::game
+                ? std::wcscmp(obj_name, L"biim: \u53f3\u4e0b\u7d20\u6750") == 0
+                : std::wcscmp(obj_name, L"biim: \u30b2\u30fc\u30e0\u7d20\u6750") == 0);
 
-            if (obj_matches || (layer_matches && (!obj_name || !*obj_name))) {
+            if (!other_biim && (obj_matches || layer_matches)) {
                 MediaOrderItem item{};
                 item.handle = obj;
                 item.length = std::max(1, obj_range.end - obj_range.start + 1);
+                item.start_frame = obj_range.start;
+                item.end_frame = obj_range.end;
                 item.path = get_media_object_path(edit, obj);
                 items.push_back(std::move(item));
                 if (out_target_layer < 0) {
@@ -1399,16 +1798,7 @@ bool apply_media_sequence_items(
         return false;
     }
 
-    const int desired_end = template_range.start + static_cast<int>(total_length) - 1;
-    if (desired_end > template_range.end) {
-        if (edit->get_object_section_num && edit->move_object_section) {
-            edit->move_object_section(
-                template_object,
-                edit->get_object_section_num(template_object),
-                desired_end);
-            template_range.end = desired_end;
-        }
-    }
+
 
     MediaTarget game_target{};
     MediaTarget bottom_right_target{};
@@ -1477,6 +1867,10 @@ bool apply_media_sequence_items(
                 if (edit->move_object(item.handle, target_layer, frame)) {
                     ++placed;
                 }
+                if (edit->get_object_section_num && edit->move_object_section) {
+                    const int section = edit->get_object_section_num(item.handle);
+                    edit->move_object_section(item.handle, section, frame + item.length - 1);
+                }
             } else if (!item.path.empty()) {
                 if (create_media_object(
                         edit,
@@ -1532,7 +1926,7 @@ bool apply_media_sequence_items(
     return placed > 0;
 }
 
-void place_media_sequence(EDIT_SECTION* edit, MediaDestination destination) {
+void open_media_manager(EDIT_SECTION* edit) {
     if (!edit || !edit->info || !edit->get_focus_object ||
         !edit->get_object_layer_frame || !edit->find_object) {
         return;
@@ -1545,108 +1939,424 @@ void place_media_sequence(EDIT_SECTION* edit, MediaDestination destination) {
         return;
     }
 
-    std::vector<std::wstring> selected_files = open_media_file_dialog();
-    if (selected_files.empty()) {
-        return;
-    }
+    UnifiedOrderDialogState state{};
+    state.edit = edit;
+    state.template_object = template_object;
+    state.current_destination = MediaDestination::game;
 
-    int target_layer = -1;
-    std::vector<MediaOrderItem> items = collect_placed_media_items(
-        edit, template_object, destination, target_layer);
-    const std::vector<MediaOrderItem> initial_items = items;
+    state.game_items = collect_placed_media_items(
+        edit, template_object, MediaDestination::game, state.game_target_layer);
+    state.initial_game_items = state.game_items;
 
-    for (const auto& path : selected_files) {
-        int item_len = 150;
-        MEDIA_INFO media{};
-        if (edit->get_media_info &&
-            edit->get_media_info(path.c_str(), &media, sizeof(media)) &&
-            media.width > 0 && media.height > 0) {
-            item_len = media_sequence_length(*edit->info, media);
+    state.bottom_right_items = collect_placed_media_items(
+        edit, template_object, MediaDestination::bottom_right, state.bottom_right_target_layer);
+    state.initial_bottom_right_items = state.bottom_right_items;
+
+    wchar_t headless[16]{};
+    if (GetEnvironmentVariableW(L"BIIM_TEMPLATE_HEADLESS_TEST", headless, 16) > 0) {
+        wchar_t length_str[32]{};
+        int override_length = 0;
+        if (GetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_MEDIA_LENGTH", length_str, 32) > 0) {
+            override_length = _wtoi(length_str);
         }
-        MediaOrderItem item{};
-        item.handle = nullptr;
-        item.path = path;
-        item.length = item_len;
-        items.push_back(std::move(item));
-    }
 
-    const LPCWSTR title = destination == MediaDestination::game
-        ? L"\u30b2\u30fc\u30e0\u7d20\u6750\u306e\u914d\u7f6e\u9806"
-        : L"\u53f3\u4e0b\u7d20\u6750\u306e\u914d\u7f6e\u9806";
+        wchar_t game_len_str[32]{};
+        int game_override = override_length;
+        if (GetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_GAME_LENGTH", game_len_str, 32) > 0) {
+            game_override = _wtoi(game_len_str);
+        }
 
-    if (!edit_media_order_dialog(items, edit, title)) {
-        return;
-    }
+        wchar_t br_len_str[32]{};
+        int br_override = override_length;
+        if (GetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_BOTTOM_RIGHT_LENGTH", br_len_str, 32) > 0) {
+            br_override = _wtoi(br_len_str);
+        }
 
-    apply_media_sequence_items(
-        edit, template_object, destination, target_layer, initial_items, items);
-}
+        wchar_t game_file[MAX_PATH]{};
+        if (GetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_GAME_FILE", game_file, MAX_PATH) > 0 && *game_file) {
+            MediaOrderItem item{};
+            item.path = game_file;
+            MEDIA_INFO media{};
+            if (game_override > 0) {
+                item.length = game_override;
+            } else if (edit->get_media_info && edit->get_media_info(game_file, &media, sizeof(media)) && media.width > 0) {
+                item.length = media_sequence_length(*edit->info, media);
+            } else {
+                item.length = 100;
+            }
+            state.game_items.push_back(item);
+            state.game_modified = true;
+        }
 
-void edit_media_sequence_order_entry(EDIT_SECTION* edit, MediaDestination destination) {
-    if (!edit || !edit->info || !edit->get_focus_object ||
-        !edit->get_object_layer_frame || !edit->find_object) {
-        return;
-    }
+        wchar_t br_file[MAX_PATH]{};
+        if (GetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_BOTTOM_RIGHT_FILE", br_file, MAX_PATH) > 0 && *br_file) {
+            MediaOrderItem item{};
+            item.path = br_file;
+            MEDIA_INFO media{};
+            if (br_override > 0) {
+                item.length = br_override;
+            } else if (edit->get_media_info && edit->get_media_info(br_file, &media, sizeof(media)) && media.width > 0) {
+                item.length = media_sequence_length(*edit->info, media);
+            } else {
+                item.length = 100;
+            }
+            state.bottom_right_items.push_back(item);
+            state.bottom_right_modified = true;
+        }
 
-    OBJECT_HANDLE template_object = edit->get_focus_object();
-    if (!template_object) {
-        show_media_message(
-            L"biim\u30c6\u30f3\u30d7\u30ec\u30fc\u30c8\u3092\u9078\u629e\u3057\u3066\u304b\u3089\u5b9f\u884c\u3057\u3066\u304f\u3060\u3055\u3044\u3002");
-        return;
-    }
+        wchar_t clear_game[16]{};
+        if (GetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_CLEAR_GAME", clear_game, 16) > 0) {
+            state.game_items.clear();
+            state.game_modified = true;
+        }
+        wchar_t clear_br[16]{};
+        if (GetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_CLEAR_BOTTOM_RIGHT", clear_br, 16) > 0) {
+            state.bottom_right_items.clear();
+            state.bottom_right_modified = true;
+        }
 
-    int target_layer = -1;
-    std::vector<MediaOrderItem> items = collect_placed_media_items(
-        edit, template_object, destination, target_layer);
+        wchar_t test_dest[16]{};
+        if (GetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_DEST", test_dest, 16) > 0 && _wtoi(test_dest) == 1) {
+            state.current_destination = MediaDestination::bottom_right;
+        }
 
-    if (items.empty()) {
-        std::vector<std::wstring> selected = open_media_file_dialog();
-        if (selected.empty()) {
+        wchar_t edit_idx_str[16]{};
+        if (GetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_EDIT_INDEX", edit_idx_str, 16) > 0) {
+            const int edit_idx = _wtoi(edit_idx_str);
+            auto& items = (state.current_destination == MediaDestination::game)
+                ? state.game_items
+                : state.bottom_right_items;
+            if (edit_idx >= 0 && edit_idx < static_cast<int>(items.size())) {
+                wchar_t new_len_str[32]{};
+                if (GetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_EDIT_NEW_LENGTH", new_len_str, 32) > 0) {
+                    items[static_cast<std::size_t>(edit_idx)].length = _wtoi(new_len_str);
+                    mark_modified(&state);
+                }
+                wchar_t new_file[MAX_PATH]{};
+                if (GetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_EDIT_NEW_FILE", new_file, MAX_PATH) > 0 && *new_file) {
+                    items[static_cast<std::size_t>(edit_idx)].path = new_file;
+                    if (items[static_cast<std::size_t>(edit_idx)].handle && edit->delete_object) {
+                        edit->delete_object(items[static_cast<std::size_t>(edit_idx)].handle);
+                    }
+                    items[static_cast<std::size_t>(edit_idx)].handle = nullptr;
+                    mark_modified(&state);
+                }
+                wchar_t move_dest[16]{};
+                if (GetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_EDIT_MOVE_DEST", move_dest, 16) > 0) {
+                    MediaOrderItem item = std::move(items[static_cast<std::size_t>(edit_idx)]);
+                    items.erase(items.begin() + edit_idx);
+                    if (item.handle && edit->delete_object) {
+                        edit->delete_object(item.handle);
+                    }
+                    item.handle = nullptr;
+                    if (state.current_destination == MediaDestination::game) {
+                        state.bottom_right_items.push_back(std::move(item));
+                    } else {
+                        state.game_items.push_back(std::move(item));
+                    }
+                    state.game_modified = true;
+                    state.bottom_right_modified = true;
+                }
+            }
+        }
+
+        wchar_t select_idx_str[16]{};
+        if (GetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_SELECT_INDEX", select_idx_str, 16) > 0) {
+            const int select_idx = _wtoi(select_idx_str);
+            const auto& items = (state.current_destination == MediaDestination::game)
+                ? state.game_items
+                : state.bottom_right_items;
+            if (select_idx >= 0 && select_idx < static_cast<int>(items.size())) {
+                const auto& item = items[static_cast<std::size_t>(select_idx)];
+                if (item.handle && edit) {
+                    if (edit->set_focus_object) {
+                        edit->set_focus_object(item.handle);
+                    }
+                    if (edit->set_cursor_layer_frame && edit->get_object_layer_frame) {
+                        const OBJECT_LAYER_FRAME obj_range = edit->get_object_layer_frame(item.handle);
+                        edit->set_cursor_layer_frame(obj_range.layer, obj_range.start);
+                        if (edit->set_display_layer_frame) {
+                            edit->set_display_layer_frame(obj_range.layer, obj_range.start);
+                        }
+                    }
+                }
+            }
+            state.accepted = false;
+        } else {
+            state.accepted = true;
+        }
+    } else {
+        constexpr wchar_t class_name[] = L"BiimTemplateUnifiedMediaWindow";
+        WNDCLASSW window_class{};
+        window_class.lpfnWndProc = unified_order_dialog_proc;
+        window_class.hInstance = GetModuleHandleW(nullptr);
+        window_class.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
+        window_class.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        window_class.lpszClassName = class_name;
+        if (!RegisterClassW(&window_class) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
             return;
         }
-        for (const auto& path : selected) {
-            int item_len = 150;
-            MEDIA_INFO media{};
-            if (edit->get_media_info &&
-                edit->get_media_info(path.c_str(), &media, sizeof(media)) &&
-                media.width > 0 && media.height > 0) {
-                item_len = media_sequence_length(*edit->info, media);
+
+        const HWND owner = GetActiveWindow();
+        RECT rectangle{0, 0, 580, 440};
+        AdjustWindowRectEx(&rectangle, WS_CAPTION | WS_SYSMENU | WS_POPUP, FALSE, WS_EX_DLGMODALFRAME);
+        int x = CW_USEDEFAULT;
+        int y = CW_USEDEFAULT;
+        RECT owner_rectangle{};
+        if (owner && GetWindowRect(owner, &owner_rectangle)) {
+            const int width = rectangle.right - rectangle.left;
+            const int height = rectangle.bottom - rectangle.top;
+            x = owner_rectangle.left + ((owner_rectangle.right - owner_rectangle.left) - width) / 2;
+            y = owner_rectangle.top + ((owner_rectangle.bottom - owner_rectangle.top) - height) / 2;
+        }
+
+        const HWND window = CreateWindowExW(
+            WS_EX_DLGMODALFRAME,
+            class_name,
+            L"\u7d20\u6750\u306e\u8ffd\u52a0\u30fb\u7de8\u96c6",
+            WS_CAPTION | WS_SYSMENU | WS_POPUP,
+            x,
+            y,
+            rectangle.right - rectangle.left,
+            rectangle.bottom - rectangle.top,
+            owner,
+            nullptr,
+            GetModuleHandleW(nullptr),
+            &state);
+        if (!window) {
+            return;
+        }
+
+        if (owner) {
+            EnableWindow(owner, FALSE);
+        }
+        ShowWindow(window, SW_SHOW);
+        UpdateWindow(window);
+        MSG message{};
+        while (IsWindow(window)) {
+            const BOOL result = GetMessageW(&message, nullptr, 0, 0);
+            if (result <= 0) {
+                if (result == 0) {
+                    PostQuitMessage(static_cast<int>(message.wParam));
+                }
+                break;
             }
-            MediaOrderItem item{};
-            item.handle = nullptr;
-            item.path = path;
-            item.length = item_len;
-            items.push_back(std::move(item));
+            if (!IsDialogMessageW(window, &message)) {
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+        }
+        if (owner) {
+            EnableWindow(owner, TRUE);
+            SetActiveWindow(owner);
         }
     }
 
-    const std::vector<MediaOrderItem> initial_items = items;
-    const LPCWSTR title = destination == MediaDestination::game
-        ? L"\u30b2\u30fc\u30e0\u7d20\u6750\u306e\u914d\u7f6e\u9806"
-        : L"\u53f3\u4e0b\u7d20\u6750\u306e\u914d\u7f6e\u9806";
+    if (state.accepted) {
+        const OBJECT_LAYER_FRAME template_range = edit->get_object_layer_frame(template_object);
+        int needed_layers = 0;
+        if (state.game_modified && !state.game_items.empty() && state.game_target_layer < 0) {
+            ++needed_layers;
+        }
+        if (state.bottom_right_modified && !state.bottom_right_items.empty() && state.bottom_right_target_layer < 0) {
+            ++needed_layers;
+        }
 
-    if (!edit_media_order_dialog(items, edit, title)) {
+        if (needed_layers > 0) {
+            std::vector<int> media_layers;
+            if (prepare_media_layers(edit, template_object, template_range, needed_layers, media_layers)) {
+                std::size_t layer_idx = 0;
+                if (state.game_modified && !state.game_items.empty() && state.game_target_layer < 0) {
+                    state.game_target_layer = media_layers[layer_idx++];
+                }
+                if (state.bottom_right_modified && !state.bottom_right_items.empty() && state.bottom_right_target_layer < 0) {
+                    state.bottom_right_target_layer = media_layers[layer_idx++];
+                }
+            }
+        }
+
+        if (state.game_modified) {
+            if (!state.game_items.empty()) {
+                apply_media_sequence_items(
+                    edit, template_object, MediaDestination::game,
+                    state.game_target_layer, state.initial_game_items, state.game_items);
+            } else if (!state.initial_game_items.empty() && edit->delete_object) {
+                for (const auto& item : state.initial_game_items) {
+                    if (item.handle) {
+                        edit->delete_object(item.handle);
+                    }
+                }
+            }
+        }
+        if (state.bottom_right_modified) {
+            if (!state.bottom_right_items.empty()) {
+                apply_media_sequence_items(
+                    edit, template_object, MediaDestination::bottom_right,
+                    state.bottom_right_target_layer, state.initial_bottom_right_items, state.bottom_right_items);
+            } else if (!state.initial_bottom_right_items.empty() && edit->delete_object) {
+                for (const auto& item : state.initial_bottom_right_items) {
+                    if (item.handle) {
+                        edit->delete_object(item.handle);
+                    }
+                }
+            }
+        }
+
+        if (state.game_modified || state.bottom_right_modified) {
+            int64_t game_length = 0;
+            for (const auto& item : state.game_items) {
+                game_length += item.length;
+            }
+            int64_t bottom_right_length = 0;
+            for (const auto& item : state.bottom_right_items) {
+                bottom_right_length += item.length;
+            }
+
+            const int64_t max_length = std::max(game_length, bottom_right_length);
+            if (max_length > 0 && edit->get_object_section_num && edit->move_object_section && edit->get_object_layer_frame) {
+                const OBJECT_LAYER_FRAME current_range = edit->get_object_layer_frame(template_object);
+                const int desired_end = current_range.start + static_cast<int>(max_length) - 1;
+                if (desired_end >= current_range.start) {
+                    edit->move_object_section(
+                        template_object,
+                        edit->get_object_section_num(template_object),
+                        desired_end);
+                }
+            }
+            sync_template_to_timeline_media(edit, true);
+        }
+    }
+}
+
+void sync_template_to_timeline_media(EDIT_SECTION* edit, bool quiet) {
+    if (!edit || !edit->info || !edit->get_focus_object ||
+        !edit->get_object_layer_frame || !edit->find_object) {
         return;
     }
 
-    apply_media_sequence_items(
-        edit, template_object, destination, target_layer, initial_items, items);
+    OBJECT_HANDLE template_object = edit->get_focus_object();
+    if (!template_object) {
+        if (!quiet) {
+            show_media_message(
+                L"biim\u30c6\u30f3\u30d7\u30ec\u30fc\u30c8\u3092\u9078\u629e\u3057\u3066\u304b\u3089\u5b9f\u884c\u3057\u3066\u304f\u3060\u3055\u3044\u3002");
+        }
+        return;
+    }
+
+    const OBJECT_LAYER_FRAME template_range = edit->get_object_layer_frame(template_object);
+
+    int game_layer = -1;
+    auto game_items = collect_placed_media_items(edit, template_object, MediaDestination::game, game_layer);
+    int br_layer = -1;
+    auto br_items = collect_placed_media_items(edit, template_object, MediaDestination::bottom_right, br_layer);
+
+    int max_end = -1;
+    for (const auto& item : game_items) {
+        if (item.handle) {
+            const OBJECT_LAYER_FRAME r = edit->get_object_layer_frame(item.handle);
+            if (r.end > max_end) {
+                max_end = r.end;
+            }
+        }
+    }
+    for (const auto& item : br_items) {
+        if (item.handle) {
+            const OBJECT_LAYER_FRAME r = edit->get_object_layer_frame(item.handle);
+            if (r.end > max_end) {
+                max_end = r.end;
+            }
+        }
+    }
+
+    if (max_end < template_range.start) {
+        int64_t game_len = 0;
+        for (const auto& item : game_items) game_len += item.length;
+        int64_t br_len = 0;
+        for (const auto& item : br_items) br_len += item.length;
+        const int64_t max_len = std::max(game_len, br_len);
+        if (max_len > 0) {
+            max_end = template_range.start + static_cast<int>(max_len) - 1;
+        }
+    }
+
+    if (max_end < template_range.start) {
+        if (!quiet) {
+            show_media_message(L"\u30bf\u30a4\u30e0\u30e9\u30a4\u30f3\u4e0a\u306bbiim\u7d20\u6750\u304c\u898b\u3064\u304b\u308a\u307e\u305b\u3093\u3067\u3057\u305f\u3002");
+        }
+        return;
+    }
+
+    OBJECT_HANDLE target_template_obj = template_object;
+    int scan_frame = template_range.end + 1;
+    while (true) {
+        OBJECT_HANDLE next_obj = edit->find_object(template_range.layer, scan_frame);
+        if (!next_obj) {
+            break;
+        }
+        OBJECT_LAYER_FRAME next_range = edit->get_object_layer_frame(next_obj);
+        LPCWSTR next_name = edit->get_object_name ? edit->get_object_name(next_obj) : nullptr;
+        if (!next_name || *next_name == L'\0' || std::wcsstr(next_name, L"biim") != nullptr) {
+            target_template_obj = next_obj;
+        }
+        if (next_range.end < scan_frame) {
+            scan_frame++;
+        } else {
+            scan_frame = next_range.end + 1;
+        }
+    }
+
+    if (edit->get_object_section_num && edit->move_object_section) {
+        edit->move_object_section(
+            target_template_obj,
+            edit->get_object_section_num(target_template_obj),
+            max_end);
+    }
 }
 
-void place_game_media_sequence(EDIT_SECTION* edit) {
-    place_media_sequence(edit, MediaDestination::game);
-}
+void sync_timeline_media_to_template(EDIT_SECTION* edit) {
+    if (!edit || !edit->info || !edit->get_focus_object ||
+        !edit->get_object_layer_frame || !edit->find_object) {
+        return;
+    }
 
-void edit_game_media_order(EDIT_SECTION* edit) {
-    edit_media_sequence_order_entry(edit, MediaDestination::game);
-}
+    OBJECT_HANDLE template_object = edit->get_focus_object();
+    if (!template_object) {
+        show_media_message(
+            L"biim\u30c6\u30f3\u30d7\u30ec\u30fc\u30c8\u3092\u9078\u629e\u3057\u3066\u304b\u3089\u5b9f\u884c\u3057\u3066\u304f\u3060\u3055\u3044\u3002");
+        return;
+    }
 
-void place_bottom_right_media_sequence(EDIT_SECTION* edit) {
-    place_media_sequence(edit, MediaDestination::bottom_right);
-}
+    const OBJECT_LAYER_FRAME template_range = edit->get_object_layer_frame(template_object);
+    const int target_end = template_range.end;
+    if (target_end < template_range.start) {
+        return;
+    }
 
-void edit_bottom_right_media_order(EDIT_SECTION* edit) {
-    edit_media_sequence_order_entry(edit, MediaDestination::bottom_right);
+    int game_layer = -1;
+    auto game_items = collect_placed_media_items(edit, template_object, MediaDestination::game, game_layer);
+    int br_layer = -1;
+    auto br_items = collect_placed_media_items(edit, template_object, MediaDestination::bottom_right, br_layer);
+
+    auto adjust_sequence = [&](const std::vector<MediaOrderItem>& items) {
+        if (items.empty() || !edit->get_object_section_num || !edit->move_object_section) {
+            return;
+        }
+        for (int i = static_cast<int>(items.size()) - 1; i >= 0; --i) {
+            if (items[static_cast<std::size_t>(i)].handle) {
+                const OBJECT_LAYER_FRAME r = edit->get_object_layer_frame(items[static_cast<std::size_t>(i)].handle);
+                if (r.start <= target_end) {
+                    edit->move_object_section(
+                        items[static_cast<std::size_t>(i)].handle,
+                        edit->get_object_section_num(items[static_cast<std::size_t>(i)].handle),
+                        target_end);
+                    break;
+                }
+            }
+        }
+    };
+
+    adjust_sequence(game_items);
+    adjust_sequence(br_items);
 }
 
 bool process_video(FILTER_PROC_VIDEO* video) {
@@ -1656,7 +2366,49 @@ bool process_video(FILTER_PROC_VIDEO* video) {
 
     const int width = video->scene->width;
     const int height = video->scene->height;
-    const Settings settings = read_settings();
+    Settings settings = read_settings();
+
+    const int current_frame = video->object ? video->object->frame : 0;
+    const double current_time = video->object ? video->object->time : 0.0;
+    const double fps = (video->scene && video->scene->rate > 0 && video->scene->scale > 0)
+        ? static_cast<double>(video->scene->rate) / static_cast<double>(video->scene->scale)
+        : 30.0;
+
+    int current_section = 0;
+    int section_count = 1;
+    if (video->edit && video->object && video->edit->find_object &&
+        video->edit->get_object_section_num && video->edit->get_object_section_frame) {
+        OBJECT_HANDLE obj = video->edit->find_object(video->object->layer, video->object->frame_s);
+        if (obj) {
+            section_count = video->edit->get_object_section_num(obj);
+            if (section_count > 1) {
+                for (int s = 1; s < section_count; ++s) {
+                    int s_frame = video->edit->get_object_section_frame(obj, s);
+                    if (s_frame >= video->object->frame_s) {
+                        s_frame -= video->object->frame_s;
+                    }
+                    if (s_frame >= 0 && current_frame >= s_frame) {
+                        current_section = s;
+                    }
+                }
+            }
+        }
+    }
+
+    std::wstring speaker_from_caption;
+    settings.caption = resolve_timed_text(
+        settings.caption, current_frame, current_time, current_section, section_count, &speaker_from_caption, fps);
+    if (!speaker_from_caption.empty()) {
+        settings.speaker = speaker_from_caption;
+    } else {
+        settings.speaker = resolve_timed_text(
+            settings.speaker, current_frame, current_time, current_section, section_count, nullptr, fps);
+    }
+    settings.title = resolve_timed_text(
+        settings.title, current_frame, current_time, current_section, section_count, nullptr, fps);
+    settings.side_text = resolve_timed_text(
+        settings.side_text, current_frame, current_time, current_section, section_count, nullptr, fps);
+
     auto* cache = static_cast<RenderCache*>(video->userdata);
 
     std::scoped_lock lock(cache->mutex);
