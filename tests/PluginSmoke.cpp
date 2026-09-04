@@ -99,15 +99,87 @@ void* find_filter_item(FILTER_PLUGIN_TABLE* table, LPCWSTR name, LPCWSTR type) {
     return nullptr;
 }
 
-OBJECT_HANDLE mock_focus_object() {
-    return reinterpret_cast<OBJECT_HANDLE>(100);
+struct MockTimelineObject {
+    OBJECT_HANDLE handle = nullptr;
+    int layer = 0;
+    int start = 0;
+    int end = 0;
+    std::wstring name;
+    std::string alias;
+};
+std::vector<MockTimelineObject> mock_timeline_objects;
+OBJECT_HANDLE mock_focused_obj = reinterpret_cast<OBJECT_HANDLE>(100);
+int mock_cursor_layer = -1;
+int mock_cursor_frame = -1;
+int mock_display_layer = -1;
+int mock_display_frame = -1;
+
+void mock_set_focus_object(OBJECT_HANDLE obj) {
+    mock_focused_obj = obj;
 }
 
-OBJECT_LAYER_FRAME mock_object_range(OBJECT_HANDLE) {
+void mock_set_cursor_layer_frame(int layer, int frame) {
+    mock_cursor_layer = layer;
+    mock_cursor_frame = frame;
+}
+
+void mock_set_display_layer_frame(int layer, int frame) {
+    mock_display_layer = layer;
+    mock_display_frame = frame;
+}
+
+OBJECT_HANDLE mock_focus_object() {
+    return mock_focused_obj;
+}
+
+OBJECT_LAYER_FRAME mock_object_range(OBJECT_HANDLE object) {
+    if (object == reinterpret_cast<OBJECT_HANDLE>(100)) {
+        return focused_range;
+    }
+    for (const auto& item : mock_timeline_objects) {
+        if (item.handle == object) {
+            return {item.layer, item.start, item.end};
+        }
+    }
     return focused_range;
 }
 
-OBJECT_HANDLE mock_find_object(int, int) {
+OBJECT_HANDLE mock_find_object(int layer, int frame) {
+    OBJECT_HANDLE best = nullptr;
+    int best_start = 10000000;
+    for (const auto& item : mock_timeline_objects) {
+        if (item.layer == layer && item.end >= frame && item.start < best_start) {
+            best_start = item.start;
+            best = item.handle;
+        }
+    }
+    return best;
+}
+
+LPCWSTR mock_get_object_name(OBJECT_HANDLE object) {
+    for (const auto& item : mock_timeline_objects) {
+        if (item.handle == object) {
+            return item.name.c_str();
+        }
+    }
+    return nullptr;
+}
+
+LPCWSTR mock_get_layer_name(int layer) {
+    for (const auto& item : mock_timeline_objects) {
+        if (item.layer == layer) {
+            return item.name.c_str();
+        }
+    }
+    return nullptr;
+}
+
+LPCSTR mock_get_object_alias(OBJECT_HANDLE object) {
+    for (const auto& item : mock_timeline_objects) {
+        if (item.handle == object) {
+            return item.alias.c_str();
+        }
+    }
     return nullptr;
 }
 
@@ -130,6 +202,11 @@ bool mock_move_object_section(OBJECT_HANDLE object, int, int frame) {
     if (object == reinterpret_cast<OBJECT_HANDLE>(100)) {
         focused_range.end = frame;
     }
+    for (auto& item : mock_timeline_objects) {
+        if (item.handle == object) {
+            item.end = frame;
+        }
+    }
     return true;
 }
 
@@ -145,6 +222,7 @@ bool mock_media_info(LPCWSTR, MEDIA_INFO* info, int) {
 OBJECT_HANDLE mock_create_media(LPCWSTR path, int layer, int frame, int length) {
     const auto handle = reinterpret_cast<OBJECT_HANDLE>(created_media.size() + 1);
     created_media.push_back({path, layer, frame, length, handle});
+    mock_timeline_objects.push_back({handle, layer, frame, frame + length - 1, L"", ""});
     return handle;
 }
 
@@ -175,12 +253,22 @@ bool mock_set_effect_item(EFFECT_HANDLE effect, LPCWSTR item, LPCSTR value) {
     return true;
 }
 
-void mock_set_object_name(OBJECT_HANDLE, LPCWSTR name) {
+void mock_set_object_name(OBJECT_HANDLE object, LPCWSTR name) {
     object_names.emplace_back(name);
+    for (auto& item : mock_timeline_objects) {
+        if (item.handle == object) {
+            item.name = name;
+        }
+    }
 }
 
-void mock_set_layer_name(int, LPCWSTR name) {
+void mock_set_layer_name(int layer, LPCWSTR name) {
     layer_names.emplace_back(name);
+    for (auto& item : mock_timeline_objects) {
+        if (item.layer == layer && item.name.empty()) {
+            item.name = name;
+        }
+    }
 }
 
 double changed_value(OBJECT_HANDLE object, LPCWSTR item) {
@@ -289,14 +377,19 @@ int wmain(int argc, wchar_t** argv) {
         place_button = static_cast<FILTER_ITEM_BUTTON*>(find_filter_item(
             table, L"\u7d20\u6750\u3092\u8ffd\u52a0", L"button"));
     }
+    auto* sync_to_media_button = static_cast<FILTER_ITEM_BUTTON*>(find_filter_item(
+        table, L"\u9577\u3055\u3092\u7d20\u6750\u306b\u5408\u308f\u305b\u308b", L"button"));
+    auto* sync_to_template_button = static_cast<FILTER_ITEM_BUTTON*>(find_filter_item(
+        table, L"\u7d20\u6750\u3092\u67a0\u306e\u9577\u3055\u306b\u5408\u308f\u305b\u308b", L"button"));
     auto* transparent_check = static_cast<FILTER_ITEM_CHECK*>(find_filter_item(
         table, L"\u53f3\u4e0b\u6b04\u3092\u900f\u904e", L"check"));
     auto* old_game_file = find_filter_item(
         table, L"\u30b2\u30fc\u30e0\u6b04\u306e\u52d5\u753b\u30fb\u753b\u50cf", L"file");
     auto* old_place_button = find_filter_item(
         table, L"\u9078\u3093\u3060\u7d20\u6750\u3092\u914d\u7f6e", L"button");
-    if (result == 0 && (!place_button || !transparent_check || old_game_file || old_place_button)) {
-        result = fail("the unified media controls are missing or old controls still exist");
+    if (result == 0 && (!place_button || !sync_to_media_button || !sync_to_template_button ||
+                        !transparent_check || old_game_file || old_place_button)) {
+        result = fail("the unified media controls or timeline sync buttons are missing or old controls still exist");
     }
 
     if (result == 0) {
@@ -352,6 +445,7 @@ int wmain(int argc, wchar_t** argv) {
 
     if (result == 0) {
         created_media.clear();
+        mock_timeline_objects.clear();
         item_changes.clear();
         object_names.clear();
         layer_names.clear();
@@ -403,6 +497,7 @@ int wmain(int argc, wchar_t** argv) {
         focused_range = {2, 10, 109};
         mock_moved_section_frame = -1;
         created_media.clear();
+        mock_timeline_objects.clear();
         item_changes.clear();
         object_names.clear();
         layer_names.clear();
@@ -426,6 +521,12 @@ int wmain(int argc, wchar_t** argv) {
         adjust_edit.set_effect_item_value = mock_set_effect_item;
         adjust_edit.set_object_name = mock_set_object_name;
         adjust_edit.set_layer_name = mock_set_layer_name;
+        adjust_edit.get_object_name = mock_get_object_name;
+        adjust_edit.get_layer_name = mock_get_layer_name;
+        adjust_edit.get_object_alias = mock_get_object_alias;
+        adjust_edit.set_focus_object = mock_set_focus_object;
+        adjust_edit.set_cursor_layer_frame = mock_set_cursor_layer_frame;
+        adjust_edit.set_display_layer_frame = mock_set_display_layer_frame;
         adjust_edit.get_layer_lock = mock_layer_lock;
         adjust_edit.move_object = mock_move_object;
         adjust_edit.get_object_section_num = mock_get_object_section_num;
@@ -446,6 +547,7 @@ int wmain(int argc, wchar_t** argv) {
             focused_range = {2, 10, 109};
             mock_moved_section_frame = -1;
             created_media.clear();
+            mock_timeline_objects.clear();
             item_changes.clear();
             object_names.clear();
             layer_names.clear();
@@ -466,6 +568,7 @@ int wmain(int argc, wchar_t** argv) {
             focused_range = {2, 10, 109};
             mock_moved_section_frame = -1;
             created_media.clear();
+            mock_timeline_objects.clear();
             item_changes.clear();
             object_names.clear();
             layer_names.clear();
@@ -491,6 +594,7 @@ int wmain(int argc, wchar_t** argv) {
             focused_range = {2, 10, 109};
             mock_moved_section_frame = -1;
             created_media.clear();
+            mock_timeline_objects.clear();
             object_names.clear();
 
             SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_GAME_FILE", L"C:\\media\\game.mp4");
@@ -517,6 +621,60 @@ int wmain(int argc, wchar_t** argv) {
 
             SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_EDIT_INDEX", nullptr);
             SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_EDIT_MOVE_DEST", nullptr);
+        }
+
+        // Timeline split & sync tests:
+        if (result == 0) {
+            mock_timeline_objects.clear();
+            // Simulate video split into 2 pieces on layer 1:
+            // piece 1: frame 10..49
+            // piece 2: frame 50..139
+            const auto h1 = reinterpret_cast<OBJECT_HANDLE>(201);
+            const auto h2 = reinterpret_cast<OBJECT_HANDLE>(202);
+            mock_timeline_objects.push_back({h1, 1, 10, 49, L"biim: \u30b2\u30fc\u30e0\u7d20\u6750", "file=\"C:\\media\\game.mp4\"\n"});
+            mock_timeline_objects.push_back({h2, 1, 50, 139, L"biim: \u30b2\u30fc\u30e0\u7d20\u6750", "file=\"C:\\media\\game.mp4\"\n"});
+
+            // Bottom-right video on layer 0: frame 10..79
+            const auto h_br = reinterpret_cast<OBJECT_HANDLE>(203);
+            mock_timeline_objects.push_back({h_br, 0, 10, 79, L"biim: \u53f3\u4e0b\u7d20\u6750", "file=\"C:\\media\\speaker.png\"\n"});
+
+            // Template is on layer 2, currently frame 10..49
+            focused_range = {2, 10, 49};
+            mock_moved_section_frame = -1;
+
+            // Sync template to media: should find max_end among all split clips = 139!
+            sync_to_media_button->callback(&adjust_edit);
+
+            if (focused_range.end != 139 || mock_moved_section_frame != 139) {
+                result = fail("sync_to_media_button did not adapt template to split timeline clips");
+            }
+
+            // Sync media to template: shorten template to frame 80, sync media
+            if (result == 0) {
+                focused_range.end = 80;
+                mock_moved_section_frame = -1;
+                sync_to_template_button->callback(&adjust_edit);
+
+                if (mock_timeline_objects[1].end != 80 || mock_timeline_objects[2].end != 80) {
+                    result = fail("sync_to_template_button did not adjust media ends to match template");
+                }
+            }
+
+            // Jump to timeline selection:
+            if (result == 0) {
+                mock_cursor_layer = -1;
+                mock_cursor_frame = -1;
+                mock_display_frame = -1;
+                SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_GAME_FILE", L"");
+                SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_BOTTOM_RIGHT_FILE", L"");
+                SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_SELECT_INDEX", L"1");
+                place_button->callback(&adjust_edit);
+
+                if (mock_focused_obj != h2 || mock_cursor_layer != 1 || mock_cursor_frame != 50 || mock_display_frame != 50) {
+                    result = fail("order_select_timeline_id did not set focus, cursor, and display frame to the split clip");
+                }
+                SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_SELECT_INDEX", nullptr);
+            }
         }
 
         SetEnvironmentVariableW(L"BIIM_TEMPLATE_HEADLESS_TEST", nullptr);

@@ -32,6 +32,12 @@ auto separator_width = FILTER_ITEM_TRACK(L"\u533a\u5207\u308a\u7dda (px)", 4.0, 
 auto auto_scale = FILTER_ITEM_CHECK(L"720p\u57fa\u6e96\u3067\u62e1\u7e2e", true);
 
 void open_media_manager(EDIT_SECTION* edit);
+void sync_template_to_timeline_media(EDIT_SECTION* edit, bool quiet = false);
+void sync_timeline_media_to_template(EDIT_SECTION* edit);
+
+void sync_template_button_callback(EDIT_SECTION* edit) {
+    sync_template_to_timeline_media(edit, false);
+}
 
 auto media_group = FILTER_ITEM_GROUP(L"\u52d5\u753b\u30fb\u753b\u50cf");
 constexpr wchar_t media_file_filter[] =
@@ -40,6 +46,10 @@ constexpr wchar_t media_file_filter[] =
     L"All Files (*.*)\0*.*\0";
 auto place_media_button = FILTER_ITEM_BUTTON(
     L"\u7d20\u6750\u306e\u8ffd\u52a0\u30fb\u7de8\u96c6", open_media_manager);
+auto sync_to_media_button = FILTER_ITEM_BUTTON(
+    L"\u9577\u3055\u3092\u7d20\u6750\u306b\u5408\u308f\u305b\u308b", sync_template_button_callback);
+auto sync_to_template_button = FILTER_ITEM_BUTTON(
+    L"\u7d20\u6750\u3092\u67a0\u306e\u9577\u3055\u306b\u5408\u308f\u305b\u308b", sync_timeline_media_to_template);
 auto bottom_right_transparent = FILTER_ITEM_CHECK(L"\u53f3\u4e0b\u6b04\u3092\u900f\u904e", false);
 
 auto background_group = FILTER_ITEM_GROUP(L"\u80cc\u666f");
@@ -80,6 +90,8 @@ void* filter_items[] = {
     &auto_scale,
     &media_group,
     &place_media_button,
+    &sync_to_media_button,
+    &sync_to_template_button,
     &bottom_right_transparent,
     &background_group,
     &sidebar_color,
@@ -766,6 +778,10 @@ bool create_media_object(
 }
 
 void show_media_message(LPCWSTR message) {
+    wchar_t headless[16]{};
+    if (GetEnvironmentVariableW(L"BIIM_TEMPLATE_HEADLESS_TEST", headless, 16) > 0) {
+        return;
+    }
     MessageBoxW(
         GetActiveWindow(),
         message,
@@ -897,6 +913,7 @@ constexpr int order_remove_id = 2104;
 constexpr int order_length_edit_id = 2112;
 constexpr int order_change_length_id = 2113;
 constexpr int order_total_label_id = 2114;
+constexpr int order_select_timeline_id = 2115;
 constexpr int order_accept_id = 2105;
 constexpr int order_cancel_id = 2106;
 
@@ -904,6 +921,8 @@ struct MediaOrderItem {
     OBJECT_HANDLE handle = nullptr;
     std::wstring path;
     int length = 1;
+    int start_frame = -1;
+    int end_frame = -1;
 };
 
 enum class MediaDestination {
@@ -939,8 +958,13 @@ std::wstring media_order_item_display_name(const MediaOrderItem& item, std::size
     } else {
         filename = L"\u914d\u7f6e\u6e08\u307f\u7d20\u6750";
     }
-    return std::to_wstring(index + 1) + L". " + filename + L" (" +
-           std::to_wstring(item.length) + L"F)";
+    std::wstring result = std::to_wstring(index + 1) + L". " + filename + L" (" +
+           std::to_wstring(item.length) + L"F";
+    if (item.start_frame >= 0 && item.end_frame >= item.start_frame) {
+        result += L", " + std::to_wstring(item.start_frame) + L"-" + std::to_wstring(item.end_frame) + L"F";
+    }
+    result += L")";
+    return result;
 }
 
 int media_sequence_length(const EDIT_INFO& info, const MEDIA_INFO& media) {
@@ -1095,6 +1119,11 @@ LRESULT CALLBACK unified_order_dialog_proc(HWND window, UINT message, WPARAM wpa
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                 454, 222, 110, 30, window,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(order_remove_id)), GetModuleHandleW(nullptr), nullptr));
+            set_control_font(CreateWindowExW(
+                0, L"BUTTON", L"\u30bf\u30a4\u30e0\u30e9\u30a4\u30f3\u3067\u9078\u629e",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                454, 258, 110, 30, window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(order_select_timeline_id)), GetModuleHandleW(nullptr), nullptr));
 
             set_control_font(CreateWindowExW(
                 0, L"STATIC", L"\u9078\u629e\u7d20\u6750\u306e\u9577\u3055:",
@@ -1266,6 +1295,24 @@ LRESULT CALLBACK unified_order_dialog_proc(HWND window, UINT message, WPARAM wpa
                 refresh_order_list(window, state, selected);
                 return 0;
             }
+            if (command == order_select_timeline_id && selected >= 0 && selected < static_cast<int>(items.size())) {
+                const auto& item = items[static_cast<std::size_t>(selected)];
+                if (item.handle && state->edit) {
+                    if (state->edit->set_focus_object) {
+                        state->edit->set_focus_object(item.handle);
+                    }
+                    if (state->edit->set_cursor_layer_frame && state->edit->get_object_layer_frame) {
+                        const OBJECT_LAYER_FRAME obj_range = state->edit->get_object_layer_frame(item.handle);
+                        state->edit->set_cursor_layer_frame(obj_range.layer, obj_range.start);
+                        if (state->edit->set_display_layer_frame) {
+                            state->edit->set_display_layer_frame(obj_range.layer, obj_range.start);
+                        }
+                    }
+                }
+                state->accepted = false;
+                DestroyWindow(window);
+                return 0;
+            }
             if (command == order_accept_id) {
                 apply_length_edit(window, state);
                 state->accepted = true;
@@ -1348,24 +1395,25 @@ std::vector<MediaOrderItem> collect_placed_media_items(
         LPCWSTR layer_name = edit->get_layer_name ? edit->get_layer_name(layer) : nullptr;
         const bool layer_matches = layer_name && std::wcscmp(layer_name, target_name) == 0;
 
-        int frame = template_range.start;
-        while (frame <= template_range.end) {
+        int frame = 0;
+        while (true) {
             OBJECT_HANDLE obj = edit->find_object(layer, frame);
             if (!obj) {
                 break;
             }
             OBJECT_LAYER_FRAME obj_range = edit->get_object_layer_frame(obj);
-            if (obj_range.start > template_range.end) {
-                break;
-            }
-
             LPCWSTR obj_name = edit->get_object_name ? edit->get_object_name(obj) : nullptr;
             const bool obj_matches = obj_name && std::wcscmp(obj_name, target_name) == 0;
+            const bool other_biim = obj_name && (destination == MediaDestination::game
+                ? std::wcscmp(obj_name, L"biim: \u53f3\u4e0b\u7d20\u6750") == 0
+                : std::wcscmp(obj_name, L"biim: \u30b2\u30fc\u30e0\u7d20\u6750") == 0);
 
-            if (obj_matches || (layer_matches && (!obj_name || !*obj_name))) {
+            if (!other_biim && (obj_matches || layer_matches)) {
                 MediaOrderItem item{};
                 item.handle = obj;
                 item.length = std::max(1, obj_range.end - obj_range.start + 1);
+                item.start_frame = obj_range.start;
+                item.end_frame = obj_range.end;
                 item.path = get_media_object_path(edit, obj);
                 items.push_back(std::move(item));
                 if (out_target_layer < 0) {
@@ -1676,7 +1724,31 @@ void open_media_manager(EDIT_SECTION* edit) {
             }
         }
 
-        state.accepted = true;
+        wchar_t select_idx_str[16]{};
+        if (GetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_SELECT_INDEX", select_idx_str, 16) > 0) {
+            const int select_idx = _wtoi(select_idx_str);
+            const auto& items = (state.current_destination == MediaDestination::game)
+                ? state.game_items
+                : state.bottom_right_items;
+            if (select_idx >= 0 && select_idx < static_cast<int>(items.size())) {
+                const auto& item = items[static_cast<std::size_t>(select_idx)];
+                if (item.handle && edit) {
+                    if (edit->set_focus_object) {
+                        edit->set_focus_object(item.handle);
+                    }
+                    if (edit->set_cursor_layer_frame && edit->get_object_layer_frame) {
+                        const OBJECT_LAYER_FRAME obj_range = edit->get_object_layer_frame(item.handle);
+                        edit->set_cursor_layer_frame(obj_range.layer, obj_range.start);
+                        if (edit->set_display_layer_frame) {
+                            edit->set_display_layer_frame(obj_range.layer, obj_range.start);
+                        }
+                    }
+                }
+            }
+            state.accepted = false;
+        } else {
+            state.accepted = true;
+        }
     } else {
         constexpr wchar_t class_name[] = L"BiimTemplateUnifiedMediaWindow";
         WNDCLASSW window_class{};
@@ -1808,15 +1880,128 @@ void open_media_manager(EDIT_SECTION* edit) {
             if (max_length > 0 && edit->get_object_section_num && edit->move_object_section && edit->get_object_layer_frame) {
                 const OBJECT_LAYER_FRAME current_range = edit->get_object_layer_frame(template_object);
                 const int desired_end = current_range.start + static_cast<int>(max_length) - 1;
-                if (desired_end != current_range.end && desired_end >= current_range.start) {
+                if (desired_end >= current_range.start) {
                     edit->move_object_section(
                         template_object,
                         edit->get_object_section_num(template_object),
                         desired_end);
                 }
             }
+            sync_template_to_timeline_media(edit, true);
         }
     }
+}
+
+void sync_template_to_timeline_media(EDIT_SECTION* edit, bool quiet) {
+    if (!edit || !edit->info || !edit->get_focus_object ||
+        !edit->get_object_layer_frame || !edit->find_object) {
+        return;
+    }
+
+    OBJECT_HANDLE template_object = edit->get_focus_object();
+    if (!template_object) {
+        if (!quiet) {
+            show_media_message(
+                L"biim\u30c6\u30f3\u30d7\u30ec\u30fc\u30c8\u3092\u9078\u629e\u3057\u3066\u304b\u3089\u5b9f\u884c\u3057\u3066\u304f\u3060\u3055\u3044\u3002");
+        }
+        return;
+    }
+
+    const OBJECT_LAYER_FRAME template_range = edit->get_object_layer_frame(template_object);
+
+    int game_layer = -1;
+    auto game_items = collect_placed_media_items(edit, template_object, MediaDestination::game, game_layer);
+    int br_layer = -1;
+    auto br_items = collect_placed_media_items(edit, template_object, MediaDestination::bottom_right, br_layer);
+
+    int max_end = -1;
+    for (const auto& item : game_items) {
+        if (item.handle) {
+            const OBJECT_LAYER_FRAME r = edit->get_object_layer_frame(item.handle);
+            if (r.end > max_end) {
+                max_end = r.end;
+            }
+        }
+    }
+    for (const auto& item : br_items) {
+        if (item.handle) {
+            const OBJECT_LAYER_FRAME r = edit->get_object_layer_frame(item.handle);
+            if (r.end > max_end) {
+                max_end = r.end;
+            }
+        }
+    }
+
+    if (max_end < template_range.start) {
+        int64_t game_len = 0;
+        for (const auto& item : game_items) game_len += item.length;
+        int64_t br_len = 0;
+        for (const auto& item : br_items) br_len += item.length;
+        const int64_t max_len = std::max(game_len, br_len);
+        if (max_len > 0) {
+            max_end = template_range.start + static_cast<int>(max_len) - 1;
+        }
+    }
+
+    if (max_end < template_range.start) {
+        if (!quiet) {
+            show_media_message(L"\u30bf\u30a4\u30e0\u30e9\u30a4\u30f3\u4e0a\u306bbiim\u7d20\u6750\u304c\u898b\u3064\u304b\u308a\u307e\u305b\u3093\u3067\u3057\u305f\u3002");
+        }
+        return;
+    }
+
+    if (edit->get_object_section_num && edit->move_object_section) {
+        edit->move_object_section(
+            template_object,
+            edit->get_object_section_num(template_object),
+            max_end);
+    }
+}
+
+void sync_timeline_media_to_template(EDIT_SECTION* edit) {
+    if (!edit || !edit->info || !edit->get_focus_object ||
+        !edit->get_object_layer_frame || !edit->find_object) {
+        return;
+    }
+
+    OBJECT_HANDLE template_object = edit->get_focus_object();
+    if (!template_object) {
+        show_media_message(
+            L"biim\u30c6\u30f3\u30d7\u30ec\u30fc\u30c8\u3092\u9078\u629e\u3057\u3066\u304b\u3089\u5b9f\u884c\u3057\u3066\u304f\u3060\u3055\u3044\u3002");
+        return;
+    }
+
+    const OBJECT_LAYER_FRAME template_range = edit->get_object_layer_frame(template_object);
+    const int target_end = template_range.end;
+    if (target_end < template_range.start) {
+        return;
+    }
+
+    int game_layer = -1;
+    auto game_items = collect_placed_media_items(edit, template_object, MediaDestination::game, game_layer);
+    int br_layer = -1;
+    auto br_items = collect_placed_media_items(edit, template_object, MediaDestination::bottom_right, br_layer);
+
+    auto adjust_sequence = [&](const std::vector<MediaOrderItem>& items) {
+        if (items.empty() || !edit->get_object_section_num || !edit->move_object_section) {
+            return;
+        }
+        for (int i = static_cast<int>(items.size()) - 1; i >= 0; --i) {
+            if (items[static_cast<std::size_t>(i)].handle) {
+                const OBJECT_LAYER_FRAME r = edit->get_object_layer_frame(items[static_cast<std::size_t>(i)].handle);
+                if (r.start <= target_end) {
+                    edit->move_object_section(
+                        items[static_cast<std::size_t>(i)].handle,
+                        edit->get_object_section_num(items[static_cast<std::size_t>(i)].handle),
+                        target_end);
+                    break;
+                }
+            }
+        }
+    };
+
+    adjust_sequence(game_items);
+    adjust_sequence(br_items);
 }
 
 bool process_video(FILTER_PROC_VIDEO* video) {
