@@ -270,29 +270,24 @@ int wmain(int argc, wchar_t** argv) {
         result = fail("the cached second frame differs from the first frame");
     }
 
-    auto* game_file = static_cast<FILTER_ITEM_FILE*>(find_filter_item(
-        table, L"\u30b2\u30fc\u30e0\u6b04\u306e\u52d5\u753b\u30fb\u753b\u50cf", L"file"));
-    auto* bottom_right_file = static_cast<FILTER_ITEM_FILE*>(find_filter_item(
-        table, L"\u53f3\u4e0b\u306e\u52d5\u753b\u30fb\u753b\u50cf", L"file"));
     auto* place_button = static_cast<FILTER_ITEM_BUTTON*>(find_filter_item(
-        table, L"\u9078\u3093\u3060\u7d20\u6750\u3092\u914d\u7f6e", L"button"));
-    auto* game_sequence_button = static_cast<FILTER_ITEM_BUTTON*>(find_filter_item(
-        table, L"\u30b2\u30fc\u30e0\u6b04\u3078\u8907\u6570\u7d20\u6750\u3092\u8ffd\u52a0", L"button"));
-    auto* edit_game_sequence_button = static_cast<FILTER_ITEM_BUTTON*>(find_filter_item(
-        table, L"\u30b2\u30fc\u30e0\u7d20\u6750\u306e\u9806\u756a\u3092\u64cd\u4f5c", L"button"));
-    auto* place_bottom_right_sequence_button = static_cast<FILTER_ITEM_BUTTON*>(find_filter_item(
-        table, L"\u53f3\u4e0b\u6b04\u3078\u8907\u6570\u7d20\u6750\u3092\u8ffd\u52a0", L"button"));
-    auto* edit_bottom_right_sequence_button = static_cast<FILTER_ITEM_BUTTON*>(find_filter_item(
-        table, L"\u53f3\u4e0b\u7d20\u6750\u306e\u9806\u756a\u3092\u64cd\u4f5c", L"button"));
-    if (result == 0 && (!game_file || !bottom_right_file || !place_button ||
-                        !game_sequence_button || !edit_game_sequence_button ||
-                        !place_bottom_right_sequence_button || !edit_bottom_right_sequence_button)) {
-        result = fail("the media controls are missing");
+        table, L"\u7d20\u6750\u3092\u8ffd\u52a0", L"button"));
+    auto* transparent_check = static_cast<FILTER_ITEM_CHECK*>(find_filter_item(
+        table, L"\u53f3\u4e0b\u6b04\u3092\u900f\u904e", L"check"));
+    auto* old_game_file = find_filter_item(
+        table, L"\u30b2\u30fc\u30e0\u6b04\u306e\u52d5\u753b\u30fb\u753b\u50cf", L"file");
+    auto* old_place_button = find_filter_item(
+        table, L"\u9078\u3093\u3060\u7d20\u6750\u3092\u914d\u7f6e", L"button");
+    if (result == 0 && (!place_button || !transparent_check || old_game_file || old_place_button)) {
+        result = fail("the unified media controls are missing or old controls still exist");
     }
 
     if (result == 0) {
-        game_file->value = L"C:\\media\\game.mp4";
-        bottom_right_file->value = L"C:\\media\\speaker.png";
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_HEADLESS_TEST", L"1");
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_GAME_FILE", L"C:\\media\\game.mp4");
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_BOTTOM_RIGHT_FILE", L"C:\\media\\speaker.png");
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_MEDIA_LENGTH", L"100");
+
         EDIT_INFO edit_info{};
         edit_info.width = 1280;
         edit_info.height = 720;
@@ -316,7 +311,7 @@ int wmain(int argc, wchar_t** argv) {
         edit.move_object = mock_move_object;
         place_button->callback(&edit);
 
-        if (created_media.size() != 2 || item_changes.size() != 6 ||
+        if (created_media.size() != 2 || item_changes.size() != 7 ||
             object_names.size() != 2 || layer_names.size() != 2) {
             result = fail("the media placement callback did not create and configure two objects");
         } else if (created_media[0].layer != 3 || created_media[1].layer != 2 ||
@@ -346,8 +341,9 @@ int wmain(int argc, wchar_t** argv) {
         object_moves.clear();
         focused_range = {0, 20, 29};
         media_video_tracks = 0;
-        game_file->value = L"C:\\media\\still.png";
-        bottom_right_file->value = L"";
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_GAME_FILE", L"C:\\media\\still.png");
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_BOTTOM_RIGHT_FILE", L"");
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_MEDIA_LENGTH", L"10");
 
         EDIT_INFO top_edit_info{};
         top_edit_info.width = 1280;
@@ -378,6 +374,11 @@ int wmain(int argc, wchar_t** argv) {
         } else if (item_changes.size() != 3) {
             result = fail("the top-layer image was not fitted into the gameplay area");
         }
+
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_HEADLESS_TEST", nullptr);
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_GAME_FILE", nullptr);
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_BOTTOM_RIGHT_FILE", nullptr);
+        SetEnvironmentVariableW(L"BIIM_TEMPLATE_TEST_MEDIA_LENGTH", nullptr);
     }
 
     table->func_destroy(1, userdata);
